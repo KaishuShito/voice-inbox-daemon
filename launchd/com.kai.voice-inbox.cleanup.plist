@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.kai.voice-inbox.cleanup</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+      <key>Hour</key>
+      <integer>3</integer>
+      <key>Minute</key>
+      <integer>20</integer>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/kai/Develop/voice-inbox-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/zsh</string>
+      <string>-lc</string>
+      <string>cd /Users/kai/Develop/voice-inbox-daemon &amp;&amp; ./dist/voice-inbox cleanup --json &gt;&gt; "$HOME/Library/Logs/voice-inbox-daemon/cleanup.log" 2&gt;&gt; "$HOME/Library/Logs/voice-inbox-daemon/cleanup.err.log"</string>
+    </array>
+  </dict>
+</plist>
