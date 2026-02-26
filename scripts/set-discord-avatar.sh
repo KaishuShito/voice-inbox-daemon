@@ -22,13 +22,33 @@ if [[ -z "$TOKEN" ]]; then
   exit 1
 fi
 
-AVATAR_DATA_URI="data:image/png;base64,$(base64 < "$IMAGE_PATH" | tr -d '\n')"
+PAYLOAD_FILE="$(mktemp)"
+AVATAR_FILE="$(mktemp)"
+trap 'rm -f "$PAYLOAD_FILE" "$AVATAR_FILE"' EXIT
+
+{
+  printf 'data:image/png;base64,'
+  base64 < "$IMAGE_PATH" | tr -d '\n'
+} > "$AVATAR_FILE"
+
+python3 - "$BOT_NAME" "$AVATAR_FILE" "$PAYLOAD_FILE" <<'PY'
+import json
+import sys
+
+username = sys.argv[1]
+avatar_path = sys.argv[2]
+out = sys.argv[3]
+with open(avatar_path, "r", encoding="utf-8") as f:
+    avatar = f.read()
+with open(out, "w", encoding="utf-8") as f:
+    json.dump({"username": username, "avatar": avatar}, f, ensure_ascii=False)
+PY
 
 STATUS=$(curl -sS -o /tmp/voice_inbox_avatar_resp.json -w "%{http_code}" \
   -X PATCH "https://discord.com/api/v10/users/@me" \
   -H "Authorization: Bot $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"username\":\"$BOT_NAME\",\"avatar\":\"$AVATAR_DATA_URI\"}")
+  --data-binary @"$PAYLOAD_FILE")
 
 if [[ "$STATUS" == "200" ]]; then
   echo "updated bot avatar successfully"
