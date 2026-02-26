@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/Users/kai/Develop/voice-inbox-daemon"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs/voice-inbox-daemon"
 POLL_LABEL="com.kai.voice-inbox.poll"
 CLEANUP_LABEL="com.kai.voice-inbox.cleanup"
+POLL_TEMPLATE="$PROJECT_DIR/launchd/${POLL_LABEL}.plist"
+CLEANUP_TEMPLATE="$PROJECT_DIR/launchd/${CLEANUP_LABEL}.plist"
+POLL_TARGET="$LAUNCH_AGENTS_DIR/${POLL_LABEL}.plist"
+CLEANUP_TARGET="$LAUNCH_AGENTS_DIR/${CLEANUP_LABEL}.plist"
 
 mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR" "$PROJECT_DIR/dist"
 
@@ -30,14 +35,31 @@ done
   go build -o ./dist/voice-inbox ./cmd/voice-inbox
 )
 
-cp "$PROJECT_DIR/launchd/${POLL_LABEL}.plist" "$LAUNCH_AGENTS_DIR/${POLL_LABEL}.plist"
-cp "$PROJECT_DIR/launchd/${CLEANUP_LABEL}.plist" "$LAUNCH_AGENTS_DIR/${CLEANUP_LABEL}.plist"
+python3 - "$POLL_TEMPLATE" "$POLL_TARGET" "$PROJECT_DIR" <<'PY'
+import pathlib
+import sys
 
-launchctl bootout "gui/$UID" "$LAUNCH_AGENTS_DIR/${POLL_LABEL}.plist" >/dev/null 2>&1 || true
-launchctl bootout "gui/$UID" "$LAUNCH_AGENTS_DIR/${CLEANUP_LABEL}.plist" >/dev/null 2>&1 || true
+template = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+out_path = pathlib.Path(sys.argv[2])
+project_dir = sys.argv[3]
+out_path.write_text(template.replace("__PROJECT_DIR__", project_dir), encoding="utf-8")
+PY
 
-launchctl bootstrap "gui/$UID" "$LAUNCH_AGENTS_DIR/${POLL_LABEL}.plist"
-launchctl bootstrap "gui/$UID" "$LAUNCH_AGENTS_DIR/${CLEANUP_LABEL}.plist"
+python3 - "$CLEANUP_TEMPLATE" "$CLEANUP_TARGET" "$PROJECT_DIR" <<'PY'
+import pathlib
+import sys
+
+template = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+out_path = pathlib.Path(sys.argv[2])
+project_dir = sys.argv[3]
+out_path.write_text(template.replace("__PROJECT_DIR__", project_dir), encoding="utf-8")
+PY
+
+launchctl bootout "gui/$UID" "$POLL_TARGET" >/dev/null 2>&1 || true
+launchctl bootout "gui/$UID" "$CLEANUP_TARGET" >/dev/null 2>&1 || true
+
+launchctl bootstrap "gui/$UID" "$POLL_TARGET"
+launchctl bootstrap "gui/$UID" "$CLEANUP_TARGET"
 
 launchctl kickstart -k "gui/$UID/$POLL_LABEL"
 

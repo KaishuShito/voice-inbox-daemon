@@ -1,5 +1,11 @@
 # OPERATIONS
 
+以下は `voice-inbox-daemon` リポジトリのルートを `PROJECT_DIR` とした例です。
+
+```bash
+PROJECT_DIR="/path/to/voice-inbox-daemon"
+```
+
 ## 日常運用
 
 1. 定期処理確認:
@@ -8,18 +14,18 @@ launchctl print "gui/$UID/com.kai.voice-inbox.poll" | head -n 40
 ```
 2. 状態確認:
 ```bash
-/Users/kai/Develop/voice-inbox-daemon/dist/voice-inbox status --json
+"$PROJECT_DIR/dist/voice-inbox" status --json
 ```
 3. 失敗再処理:
 ```bash
-/Users/kai/Develop/voice-inbox-daemon/dist/voice-inbox retry --json
+"$PROJECT_DIR/dist/voice-inbox" retry --json
 ```
 
 ## トラブル時の確認順
 
 1. `doctor` 実行
 ```bash
-/Users/kai/Develop/voice-inbox-daemon/dist/voice-inbox doctor --json
+"$PROJECT_DIR/dist/voice-inbox" doctor --json
 ```
 2. ログ確認
 ```bash
@@ -42,20 +48,20 @@ sqlite3 "$HOME/Library/Application Support/voice-inbox-daemon/state.db" \
 ## 手動1サイクル実行
 
 ```bash
-/Users/kai/Develop/voice-inbox-daemon/dist/voice-inbox poll --once --json
+"$PROJECT_DIR/dist/voice-inbox" poll --once --json
 ```
 
 ## Cleanup 手動実行
 
 ```bash
-/Users/kai/Develop/voice-inbox-daemon/dist/voice-inbox cleanup --json
+"$PROJECT_DIR/dist/voice-inbox" cleanup --json
 ```
 
 ## リリース更新手順
 
 1. 変更後にテスト
 ```bash
-cd /Users/kai/Develop/voice-inbox-daemon
+cd "$PROJECT_DIR"
 go test ./...
 ```
 2. ビルド

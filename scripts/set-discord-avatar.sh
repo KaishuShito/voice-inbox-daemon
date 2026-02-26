@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/Users/kai/Develop/voice-inbox-daemon"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$PROJECT_DIR/.env"
 IMAGE_PATH="${1:-$PROJECT_DIR/assets/bot-avatar.png}"
 BOT_NAME="${2:-voice-inbox}"

@@ -27,7 +27,8 @@ Discord の `#voice-input` に投げた音声メモを、5分おきに拾って 
 ## Quick start
 
 ```bash
-cd /Users/kai/Develop/voice-inbox-daemon
+git clone https://github.com/KaishuShito/voice-inbox-daemon.git
+cd voice-inbox-daemon
 cp .env.example .env
 chmod 600 .env
 
