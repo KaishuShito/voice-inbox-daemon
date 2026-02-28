@@ -129,7 +129,7 @@ func (r *Runner) PollOnce(ctx context.Context) (Result, error) {
 		}
 	}
 
-	candidates := FilterAudioMessages(messages, r.cfg.AllowedAuthorIDs)
+	candidates := FilterMessages(messages, r.cfg.AllowedAuthorIDs)
 	fallbackGuildID := ""
 	for _, m := range messages {
 		if strings.TrimSpace(m.GuildID) != "" {
@@ -170,6 +170,7 @@ func (r *Runner) PollOnce(ctx context.Context) (Result, error) {
 			AttachmentURL:      c.Attachment.URL,
 			AttachmentFilename: c.Attachment.Filename,
 			ContentType:        c.Attachment.ContentType,
+			MessageContent:     c.Message.Content,
 			DiscordJumpURL:     c.JumpURL,
 		}
 		if err := r.store.UpsertPending(recUpsert); err != nil {
@@ -295,6 +296,7 @@ func (r *Runner) Retry(ctx context.Context) (Result, error) {
 			Message: discord.Message{
 				ID:        rec.MessageID,
 				ChannelID: rec.ChannelID,
+				Content:   rec.MessageContent,
 				Author:    discord.User{ID: rec.AuthorID},
 			},
 			Attachment: discord.Attachment{
@@ -303,6 +305,7 @@ func (r *Runner) Retry(ctx context.Context) (Result, error) {
 				Filename:    rec.AttachmentFilename,
 				ContentType: rec.ContentType,
 			},
+			Kind:    kindFromContentType(rec.ContentType),
 			JumpURL: rec.DiscordJumpURL,
 		}
 		succeeded, requeued, procErr := r.processCandidate(ctx, c, rec.Attempts)
@@ -441,31 +444,55 @@ func (r *Runner) processCandidate(ctx context.Context, c Candidate, previousAtte
 		jumpURL = journal.DiscordJumpURL(c.Message.GuildID, c.Message.ChannelID, c.Message.ID)
 	}
 
+	kind := c.Kind
+	if kind == "" {
+		kind = kindFromContentType(c.Attachment.ContentType)
+		if kind == "" && strings.TrimSpace(c.Message.Content) != "" {
+			kind = CandidateKindText
+		}
+	}
+
+	var transcriptText string
+	transcriptPath := ""
+	audioPath := ""
+	journalAudioFile := ""
+	whisperModel := r.cfg.WhisperModel
+
 	subdir := now.Format("2006/01/02")
 	prefix := fmt.Sprintf("%s_%s", c.Message.ID, c.Attachment.ID)
 	origPath := filepath.Join(r.cfg.AudioStoreDir, subdir, prefix+".orig")
 	wavPath := filepath.Join(r.cfg.AudioStoreDir, subdir, prefix+".wav")
 	transcriptDir := filepath.Join(r.cfg.AudioStoreDir, subdir, "transcripts")
 
-	if err := r.discord.DownloadAttachment(ctx, c.Attachment.URL, origPath); err != nil {
-		return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
-	}
+	if kind == CandidateKindText {
+		transcriptText = strings.TrimSpace(c.Message.Content)
+		whisperModel = "direct-text"
+		journalAudioFile = "(text-only)"
+	} else {
+		if err := r.discord.DownloadAttachment(ctx, c.Attachment.URL, origPath); err != nil {
+			return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+		}
 
-	if err := transcribe.NormalizeToWav(ctx, r.cfg.FFmpegBin, origPath, wavPath); err != nil {
-		return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
-	}
+		if err := transcribe.NormalizeToWav(ctx, r.cfg.FFmpegBin, origPath, wavPath); err != nil {
+			return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+		}
 
-	txCtx, cancel := transcribe.ContextWithTranscriptionTimeout(ctx)
-	defer cancel()
+		txCtx, cancel := transcribe.ContextWithTranscriptionTimeout(ctx)
+		defer cancel()
 
-	txRes, err := transcribe.RunWhisper(
-		txCtx,
-		transcribe.WhisperConfig{Bin: r.cfg.WhisperBin, Model: r.cfg.WhisperModel, Language: r.cfg.WhisperLanguage},
-		wavPath,
-		transcriptDir,
-	)
-	if err != nil {
-		return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+		txRes, err := transcribe.RunWhisper(
+			txCtx,
+			transcribe.WhisperConfig{Bin: r.cfg.WhisperBin, Model: r.cfg.WhisperModel, Language: r.cfg.WhisperLanguage},
+			wavPath,
+			transcriptDir,
+		)
+		if err != nil {
+			return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+		}
+		transcriptText = txRes.Text
+		transcriptPath = txRes.TranscriptJSON
+		audioPath = origPath
+		journalAudioFile = relativeOrSelf(origPath, r.cfg.AudioStoreDir)
 	}
 
 	journalPath := journal.FilePath(r.cfg.VaultJournalDir, now)
@@ -481,13 +508,13 @@ func (r *Runner) processCandidate(ctx context.Context, c Candidate, previousAtte
 
 	entry := journal.BuildEntry(journal.EntryInput{
 		Now:          now,
-		Transcript:   txRes.Text,
+		Transcript:   transcriptText,
 		ChannelID:    c.Message.ChannelID,
 		MessageID:    c.Message.ID,
 		AuthorID:     c.Message.Author.ID,
 		JumpURL:      jumpURL,
-		AudioFile:    relativeOrSelf(origPath, r.cfg.AudioStoreDir),
-		WhisperModel: r.cfg.WhisperModel,
+		AudioFile:    journalAudioFile,
+		WhisperModel: whisperModel,
 		ProcessedAt:  time.Now(),
 	})
 
@@ -510,8 +537,8 @@ func (r *Runner) processCandidate(ctx context.Context, c Candidate, previousAtte
 			attempts,
 			next,
 			journalPath,
-			origPath,
-			txRes.TranscriptJSON,
+			audioPath,
+			transcriptPath,
 			jumpURL,
 		)
 		if markErr != nil {
@@ -520,7 +547,7 @@ func (r *Runner) processCandidate(ctx context.Context, c Candidate, previousAtte
 		return false, true, fmt.Errorf("reaction failed: %w", err)
 	}
 
-	if err := r.store.MarkDone(c.Message.ID, journalPath, origPath, txRes.TranscriptJSON, jumpURL); err != nil {
+	if err := r.store.MarkDone(c.Message.ID, journalPath, audioPath, transcriptPath, jumpURL); err != nil {
 		return false, false, err
 	}
 	return true, false, nil
@@ -571,6 +598,16 @@ func relativeOrSelf(targetPath, baseDir string) string {
 		return targetPath
 	}
 	return rel
+}
+
+func kindFromContentType(contentType string) CandidateKind {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "audio/") {
+		return CandidateKindAudio
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "text/") {
+		return CandidateKindText
+	}
+	return ""
 }
 
 func checkExecutable(path string) error {

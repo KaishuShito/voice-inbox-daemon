@@ -37,6 +37,7 @@ type Message struct {
 	ChannelID   string       `json:"channel_id"`
 	GuildID     string       `json:"guild_id"`
 	Timestamp   string       `json:"timestamp"`
+	Content     string       `json:"content"`
 	Author      User         `json:"author"`
 	Attachments []Attachment `json:"attachments"`
 }

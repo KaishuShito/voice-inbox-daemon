@@ -301,6 +301,16 @@ func makeMessage(serverURL, messageID string) discord.Message {
 	}
 }
 
+func makeTextMessage(messageID, content string) discord.Message {
+	return discord.Message{
+		ID:        messageID,
+		ChannelID: "1476388224124325909",
+		GuildID:   "g1",
+		Content:   content,
+		Author:    discord.User{ID: "968754117885456425"},
+	}
+}
+
 func TestPollOnceSuccessAndNoDuplicate(t *testing.T) {
 	dm := newDiscordMock(t)
 	defer dm.close()
@@ -408,5 +418,43 @@ func TestPollOnceReactionFailureGoesReactionPending(t *testing.T) {
 	}
 	if rec.JournalPath == "" || rec.TranscriptPath == "" {
 		t.Fatalf("expected artifacts to be saved for reaction retry")
+	}
+}
+
+func TestPollOnceTextMessage(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	dm.messages = []discord.Message{makeTextMessage("4001", "これはテキスト入力です")}
+	runner, st, _, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	res, err := runner.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("poll once failed for text message: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	rec, found, err := st.GetMessage("4001")
+	if err != nil || !found {
+		t.Fatalf("expected stored text message: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected done status, got %s", rec.Status)
+	}
+	if rec.AudioPath != "" {
+		t.Fatalf("expected empty audio path for text message, got %s", rec.AudioPath)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	if !strings.Contains(om.files[journalPath], "これはテキスト入力です") {
+		t.Fatalf("journal should include text message content")
+	}
+	if !strings.Contains(om.files[journalPath], `whisper_model: "direct-text"`) {
+		t.Fatalf("journal should include direct-text marker")
 	}
 }

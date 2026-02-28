@@ -25,6 +25,7 @@ type MessageRecord struct {
 	AttachmentURL      string
 	AttachmentFilename string
 	ContentType        string
+	MessageContent     string
 	AudioPath          string
 	TranscriptPath     string
 	Status             string
@@ -79,6 +80,7 @@ func (s *Store) initSchema() error {
 		  attachment_url TEXT NOT NULL,
 		  attachment_filename TEXT,
 		  content_type TEXT,
+		  message_content TEXT,
 		  audio_path TEXT,
 		  transcript_path TEXT,
 		  status TEXT NOT NULL,
@@ -107,6 +109,12 @@ func (s *Store) initSchema() error {
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN message_content TEXT`); err != nil {
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "duplicate column name") {
 			return err
 		}
 	}
@@ -160,9 +168,9 @@ func (s *Store) UpsertPending(rec MessageRecord) error {
 	_, err := s.db.Exec(`
 		INSERT INTO messages (
 			message_id, channel_id, author_id, attachment_id, attachment_url,
-			attachment_filename, content_type, status, attempts, created_at, updated_at,
+			attachment_filename, content_type, message_content, status, attempts, created_at, updated_at,
 			discord_jump_url
-		) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
 		ON CONFLICT(message_id) DO UPDATE SET
 			channel_id = excluded.channel_id,
 			author_id = excluded.author_id,
@@ -170,11 +178,12 @@ func (s *Store) UpsertPending(rec MessageRecord) error {
 			attachment_url = excluded.attachment_url,
 			attachment_filename = excluded.attachment_filename,
 			content_type = excluded.content_type,
+			message_content = excluded.message_content,
 			discord_jump_url = excluded.discord_jump_url,
 			updated_at = excluded.updated_at
 	`,
 		rec.MessageID, rec.ChannelID, rec.AuthorID, rec.AttachmentID, rec.AttachmentURL,
-		rec.AttachmentFilename, rec.ContentType, now, now, rec.DiscordJumpURL,
+		rec.AttachmentFilename, rec.ContentType, rec.MessageContent, now, now, rec.DiscordJumpURL,
 	)
 	return err
 }
@@ -182,7 +191,7 @@ func (s *Store) UpsertPending(rec MessageRecord) error {
 func (s *Store) GetMessage(messageID string) (MessageRecord, bool, error) {
 	row := s.db.QueryRow(`
 		SELECT message_id, channel_id, author_id, attachment_id, attachment_url, attachment_filename,
-			content_type, audio_path, transcript_path, status, attempts, next_retry_at,
+			content_type, message_content, audio_path, transcript_path, status, attempts, next_retry_at,
 			last_error, journal_path, discord_jump_url, created_at, updated_at
 		FROM messages WHERE message_id = ?
 	`, messageID)
@@ -275,7 +284,7 @@ func (s *Store) ListRetryCandidates(now time.Time, limit int) ([]MessageRecord, 
 	}
 	rows, err := s.db.Query(`
 		SELECT message_id, channel_id, author_id, attachment_id, attachment_url, attachment_filename,
-			content_type, audio_path, transcript_path, status, attempts, next_retry_at,
+			content_type, message_content, audio_path, transcript_path, status, attempts, next_retry_at,
 			last_error, journal_path, discord_jump_url, created_at, updated_at
 		FROM messages
 		WHERE status IN ('failed', 'reaction_pending')
@@ -314,7 +323,7 @@ func (s *Store) ListDoneWithAudioBefore(cutoff time.Time, limit int) ([]MessageR
 	}
 	rows, err := s.db.Query(`
 		SELECT message_id, channel_id, author_id, attachment_id, attachment_url, attachment_filename,
-			content_type, audio_path, transcript_path, status, attempts, next_retry_at,
+			content_type, message_content, audio_path, transcript_path, status, attempts, next_retry_at,
 			last_error, journal_path, discord_jump_url, created_at, updated_at
 		FROM messages
 		WHERE status = 'done'
@@ -347,7 +356,7 @@ func (s *Store) ListDoneWithTranscriptBefore(cutoff time.Time, limit int) ([]Mes
 	}
 	rows, err := s.db.Query(`
 		SELECT message_id, channel_id, author_id, attachment_id, attachment_url, attachment_filename,
-			content_type, audio_path, transcript_path, status, attempts, next_retry_at,
+			content_type, message_content, audio_path, transcript_path, status, attempts, next_retry_at,
 			last_error, journal_path, discord_jump_url, created_at, updated_at
 		FROM messages
 		WHERE status = 'done'
@@ -437,6 +446,7 @@ func scanMessageRows(rows *sql.Rows) (MessageRecord, bool, error) {
 	var journalPath sql.NullString
 	var jumpURL sql.NullString
 	var contentType sql.NullString
+	var messageContent sql.NullString
 	var attachmentFilename sql.NullString
 	var createdAtRaw string
 	var updatedAtRaw string
@@ -449,6 +459,7 @@ func scanMessageRows(rows *sql.Rows) (MessageRecord, bool, error) {
 		&rec.AttachmentURL,
 		&attachmentFilename,
 		&contentType,
+		&messageContent,
 		&audioPath,
 		&transcriptPath,
 		&rec.Status,
@@ -468,6 +479,9 @@ func scanMessageRows(rows *sql.Rows) (MessageRecord, bool, error) {
 	}
 	if contentType.Valid {
 		rec.ContentType = contentType.String
+	}
+	if messageContent.Valid {
+		rec.MessageContent = messageContent.String
 	}
 	if audioPath.Valid {
 		rec.AudioPath = audioPath.String
@@ -512,6 +526,7 @@ func scanMessageRow(row rowScanner) (MessageRecord, bool, error) {
 	var journalPath sql.NullString
 	var jumpURL sql.NullString
 	var contentType sql.NullString
+	var messageContent sql.NullString
 	var attachmentFilename sql.NullString
 	var createdAtRaw string
 	var updatedAtRaw string
@@ -524,6 +539,7 @@ func scanMessageRow(row rowScanner) (MessageRecord, bool, error) {
 		&rec.AttachmentURL,
 		&attachmentFilename,
 		&contentType,
+		&messageContent,
 		&audioPath,
 		&transcriptPath,
 		&rec.Status,
@@ -543,6 +559,9 @@ func scanMessageRow(row rowScanner) (MessageRecord, bool, error) {
 	}
 	if contentType.Valid {
 		rec.ContentType = contentType.String
+	}
+	if messageContent.Valid {
+		rec.MessageContent = messageContent.String
 	}
 	if audioPath.Valid {
 		rec.AudioPath = audioPath.String
