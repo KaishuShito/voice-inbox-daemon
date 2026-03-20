@@ -55,17 +55,19 @@ func BuildEntry(in EntryInput) string {
 	if source == "" {
 		source = "discord"
 	}
+	captureKey := CaptureKey(source, in.CaptureID)
 	capturedAt := ""
 	if in.CapturedAt != nil && !in.CapturedAt.IsZero() {
 		capturedAt = in.CapturedAt.UTC().Format(time.RFC3339)
 	}
 
 	return fmt.Sprintf(
-		"\n## ログ - %s\n### 🎤 Voice Inbox\n\n%s\n\n```yaml\nvoice_inbox:\n  source: \"%s\"\n  capture_id: \"%s\"\n  device_id: \"%s\"\n  captured_at: \"%s\"\n  discord_channel_id: \"%s\"\n  discord_message_id: \"%s\"\n  discord_author_id: \"%s\"\n  discord_jump_url: \"%s\"\n  audio_file: \"%s\"\n  whisper_model: \"%s\"\n  processed_at: \"%s\"\n```\n",
+		"\n## ログ - %s\n### 🎤 Voice Inbox\n\n%s\n\n```yaml\nvoice_inbox:\n  source: \"%s\"\n  capture_id: \"%s\"\n  capture_key: \"%s\"\n  device_id: \"%s\"\n  captured_at: \"%s\"\n  discord_channel_id: \"%s\"\n  discord_message_id: \"%s\"\n  discord_author_id: \"%s\"\n  discord_jump_url: \"%s\"\n  audio_file: \"%s\"\n  whisper_model: \"%s\"\n  processed_at: \"%s\"\n```\n",
 		headlineTime,
 		transcript,
 		source,
 		in.CaptureID,
+		captureKey,
 		in.DeviceID,
 		capturedAt,
 		in.ChannelID,
@@ -76,6 +78,14 @@ func BuildEntry(in EntryInput) string {
 		in.WhisperModel,
 		processedAt,
 	)
+}
+
+func CaptureKey(source, captureID string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "discord"
+	}
+	return source + ":" + strings.TrimSpace(captureID)
 }
 
 func DiscordJumpURL(guildID, channelID, messageID string) string {

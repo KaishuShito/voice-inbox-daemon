@@ -47,6 +47,7 @@ func TestBuildEntry(t *testing.T) {
 		"voice_inbox:",
 		`source: "discord"`,
 		`capture_id: "123"`,
+		`capture_key: "discord:123"`,
 		`discord_message_id: "123"`,
 		`audio_file: "2026/02/26/123_abc.orig"`,
 	}

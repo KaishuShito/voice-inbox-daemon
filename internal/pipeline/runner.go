@@ -782,7 +782,7 @@ func (r *Runner) processTarget(ctx context.Context, target processTarget) (proce
 		ProcessedAt:  time.Now(),
 	})
 
-	alreadyLogged, err := r.journalContainsCapture(ctx, journalPath, target.CaptureID)
+	alreadyLogged, err := r.journalContainsCapture(ctx, journalPath, target.Source, target.CaptureID)
 	if err != nil {
 		return processArtifacts{}, err
 	}
@@ -799,12 +799,12 @@ func (r *Runner) processTarget(ctx context.Context, target processTarget) (proce
 	}, nil
 }
 
-func (r *Runner) journalContainsCapture(ctx context.Context, journalPath, captureID string) (bool, error) {
+func (r *Runner) journalContainsCapture(ctx context.Context, journalPath, source, captureID string) (bool, error) {
 	content, err := r.obsidian.ReadFile(ctx, journalPath)
 	if err != nil {
 		return false, err
 	}
-	marker := fmt.Sprintf("capture_id: \"%s\"", captureID)
+	marker := fmt.Sprintf("capture_key: \"%s\"", journal.CaptureKey(source, captureID))
 	return strings.Contains(content, marker), nil
 }
 

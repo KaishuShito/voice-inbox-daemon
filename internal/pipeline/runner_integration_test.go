@@ -719,6 +719,59 @@ func TestProcessTargetDefaultsUnknownMimeRawFileToAudio(t *testing.T) {
 	}
 }
 
+func TestProcessTargetJournalDedupeIncludesSource(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, _, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawDir := filepath.Join(cfg.AudioStoreDir, "ingest", "2026", "03", "19")
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+
+	firstPath := filepath.Join(rawDir, "shared-id-discord.ogg")
+	if err := os.WriteFile(firstPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write first raw audio: %v", err)
+	}
+	if _, err := runner.processTarget(context.Background(), processTarget{
+		Source:       "discord",
+		CaptureID:    "shared-id",
+		ContentType:  "audio/ogg",
+		RawAudioPath: firstPath,
+	}); err != nil {
+		t.Fatalf("process first target failed: %v", err)
+	}
+
+	secondPath := filepath.Join(rawDir, "shared-id-android.ogg")
+	if err := os.WriteFile(secondPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write second raw audio: %v", err)
+	}
+	if _, err := runner.processTarget(context.Background(), processTarget{
+		Source:       "android-voice-inbox",
+		CaptureID:    "shared-id",
+		ContentType:  "audio/ogg",
+		RawAudioPath: secondPath,
+	}); err != nil {
+		t.Fatalf("process second target failed: %v", err)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	content := om.files[journalPath]
+	if strings.Count(content, `capture_id: "shared-id"`) != 2 {
+		t.Fatalf("expected both entries to be appended, got %s", content)
+	}
+	if !strings.Contains(content, `capture_key: "discord:shared-id"`) {
+		t.Fatalf("journal should include discord capture key")
+	}
+	if !strings.Contains(content, `capture_key: "android-voice-inbox:shared-id"`) {
+		t.Fatalf("journal should include android capture key")
+	}
+}
+
 func TestProcessCapturesOnceRecoversProcessingCapture(t *testing.T) {
 	dm := newDiscordMock(t)
 	defer dm.close()
