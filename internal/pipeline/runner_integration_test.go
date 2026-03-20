@@ -717,6 +717,11 @@ func TestProcessTargetDefaultsUnknownMimeRawFileToAudio(t *testing.T) {
 	if !strings.Contains(content, `capture_id: "capture-octet-stream"`) {
 		t.Fatalf("journal should include capture marker")
 	}
+
+	normalizedPath := filepath.Join(filepath.Dir(rawPath), "capture-octet-stream_16k.wav")
+	if _, err := os.Stat(normalizedPath); !os.IsNotExist(err) {
+		t.Fatalf("expected normalized wav cleanup, stat err=%v", err)
+	}
 }
 
 func TestProcessTargetJournalDedupeIncludesSource(t *testing.T) {

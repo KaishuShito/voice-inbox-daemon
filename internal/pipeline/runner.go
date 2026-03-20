@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -731,7 +732,7 @@ func (r *Runner) processTarget(ctx context.Context, target processTarget) (proce
 
 		baseDir := filepath.Dir(origPath)
 		baseName := strings.TrimSuffix(filepath.Base(origPath), filepath.Ext(origPath))
-		wavPath := filepath.Join(baseDir, baseName+".wav")
+		wavPath := filepath.Join(baseDir, baseName+"_16k.wav")
 		transcriptDir := filepath.Join(baseDir, "transcripts")
 
 		if err := transcribe.NormalizeToWav(ctx, r.cfg.FFmpegBin, origPath, wavPath); err != nil {
@@ -749,6 +750,9 @@ func (r *Runner) processTarget(ctx context.Context, target processTarget) (proce
 		)
 		if err != nil {
 			return processArtifacts{}, err
+		}
+		if err := os.Remove(wavPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("cleanup normalized wav %s: %v", wavPath, err)
 		}
 		transcriptText = txRes.Text
 		transcriptPath = txRes.TranscriptJSON
