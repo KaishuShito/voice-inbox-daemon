@@ -679,6 +679,46 @@ func TestProcessCapturesOnceTreatsStoredRawFileAsAudioDespiteTextMime(t *testing
 	}
 }
 
+func TestProcessTargetDefaultsUnknownMimeRawFileToAudio(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, _, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawPath := filepath.Join(cfg.AudioStoreDir, "ingest", "2026", "03", "19", "capture-octet-stream.bin")
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+
+	artifacts, err := runner.processTarget(context.Background(), processTarget{
+		Source:       "android-voice-inbox",
+		CaptureID:    "capture-octet-stream",
+		ContentType:  "application/octet-stream",
+		RawAudioPath: rawPath,
+	})
+	if err != nil {
+		t.Fatalf("process target failed: %v", err)
+	}
+	if artifacts.TranscriptPath == "" {
+		t.Fatalf("expected transcript artifact, got %+v", artifacts)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	content := om.files[journalPath]
+	if !strings.Contains(content, "テスト文字起こし") {
+		t.Fatalf("journal should include transcript")
+	}
+	if !strings.Contains(content, `capture_id: "capture-octet-stream"`) {
+		t.Fatalf("journal should include capture marker")
+	}
+}
+
 func TestProcessCapturesOnceRecoversProcessingCapture(t *testing.T) {
 	dm := newDiscordMock(t)
 	defer dm.close()

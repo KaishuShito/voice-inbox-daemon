@@ -696,6 +696,9 @@ func (r *Runner) processTarget(ctx context.Context, target processTarget) (proce
 	kind := target.Kind
 	if kind == "" {
 		kind = kindFromContentType(target.ContentType)
+		if kind == "" && strings.TrimSpace(target.RawAudioPath) != "" {
+			kind = CandidateKindAudio
+		}
 		if kind == "" && strings.TrimSpace(target.TextContent) != "" {
 			kind = CandidateKindText
 		}
