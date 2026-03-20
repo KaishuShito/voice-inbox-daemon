@@ -134,6 +134,30 @@ func TestCapturesDedupedBySourceKeyDoNotLeaveOrphanFile(t *testing.T) {
 	}
 }
 
+func TestCapturesRejectInvalidCaptureID(t *testing.T) {
+	srv, st, audioRoot := newTestServer(t)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newCaptureRequest(t, "../../etc/passwd", "pixel-8a", "2026-03-19T11:00:00Z", "audio/ogg", []byte("audio-bytes")))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, found, err := st.GetCapture("../../etc/passwd"); err != nil {
+		t.Fatalf("lookup capture: %v", err)
+	} else if found {
+		t.Fatalf("expected no stored capture row for invalid capture_id")
+	}
+
+	files, err := collectFiles(audioRoot)
+	if err != nil {
+		t.Fatalf("collect files: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("expected no stored files for invalid capture_id, got %v", files)
+	}
+}
+
 func newTestServer(t *testing.T) (*Server, *state.Store, string) {
 	t.Helper()
 	tmp := t.TempDir()

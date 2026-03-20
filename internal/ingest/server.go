@@ -79,6 +79,10 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "capture_id is required", http.StatusBadRequest)
 		return
 	}
+	if !validCaptureID(captureID) {
+		http.Error(w, "capture_id is invalid", http.StatusBadRequest)
+		return
+	}
 	dedupeKey := strings.TrimSpace(r.FormValue("source_dedupe_key"))
 	if dedupeKey == "" {
 		dedupeKey = captureID
@@ -218,8 +222,12 @@ func (s *Server) persistUpload(src io.Reader, filename, headerContentType, captu
 		ext = ".bin"
 	}
 
-	finalPath := filepath.Join(subdir, captureID+ext)
-	tmp, err := os.CreateTemp(subdir, captureID+".*.tmp")
+	baseCaptureID := filepath.Base(captureID)
+	finalPath := filepath.Join(subdir, baseCaptureID+ext)
+	if !pathWithinRoot(s.cfg.AudioStoreDir, finalPath) {
+		return persistedUpload{}, fmt.Errorf("capture path escapes audio store")
+	}
+	tmp, err := os.CreateTemp(subdir, baseCaptureID+".*.tmp")
 	if err != nil {
 		return persistedUpload{}, err
 	}
@@ -261,6 +269,27 @@ func (s *Server) removePersistedUpload(upload persistedUpload) error {
 		}
 	}
 	return firstErr
+}
+
+func validCaptureID(captureID string) bool {
+	if captureID == "" {
+		return false
+	}
+	if strings.Contains(captureID, "..") {
+		return false
+	}
+	if strings.ContainsAny(captureID, `/\`) {
+		return false
+	}
+	return filepath.Base(captureID) == captureID
+}
+
+func pathWithinRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
