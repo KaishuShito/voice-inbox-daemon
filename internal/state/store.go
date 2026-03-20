@@ -329,20 +329,72 @@ func (s *Store) GetCaptureBySourceDedupeKey(sourceDedupeKey string) (CaptureReco
 	return rec, found, nil
 }
 
-func (s *Store) RecoverStuckCaptures() (int, error) {
-	res, err := s.db.Exec(`
-		UPDATE captures
-		SET status = 'pending', next_retry_at = NULL, updated_at = ?
-		WHERE status = 'processing'
-	`, time.Now().UTC().Format(time.RFC3339))
+func (s *Store) RecoverStuckCaptures(now time.Time, staleAfter time.Duration, retryBaseSeconds, retryMaxSeconds int) (int, error) {
+	if staleAfter <= 0 {
+		staleAfter = 5 * time.Minute
+	}
+	now = now.UTC()
+	cutoff := now.Add(-staleAfter).Format(time.RFC3339)
+
+	rows, err := s.db.Query(`
+		SELECT capture_id, attempts
+		FROM captures
+		WHERE status = 'processing' AND updated_at <= ?
+	`, cutoff)
 	if err != nil {
 		return 0, err
 	}
-	n, err := res.RowsAffected()
+	defer rows.Close()
+
+	type stuckCapture struct {
+		captureID string
+		attempts  int
+	}
+	var stuck []stuckCapture
+	for rows.Next() {
+		var rec stuckCapture
+		if err := rows.Scan(&rec.captureID, &rec.attempts); err != nil {
+			return 0, err
+		}
+		stuck = append(stuck, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(stuck) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return int(n), nil
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	for _, rec := range stuck {
+		attempts := rec.attempts + 1
+		nextRetryAt := recoverCaptureNextRetryAt(now, attempts, retryBaseSeconds, retryMaxSeconds)
+		if _, err := tx.Exec(`
+			UPDATE captures
+			SET status = 'failed', attempts = ?, next_retry_at = ?, updated_at = ?, last_error = ?
+			WHERE capture_id = ?
+		`,
+			attempts,
+			nextRetryAt.Format(time.RFC3339),
+			now.Format(time.RFC3339),
+			"recovered from stuck processing",
+			rec.captureID,
+		); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(stuck), nil
 }
 
 func (s *Store) ListCapturesForProcessing(now time.Time, limit int) ([]CaptureRecord, error) {
@@ -375,6 +427,31 @@ func (s *Store) ListCapturesForProcessing(now time.Time, limit int) ([]CaptureRe
 		}
 	}
 	return out, rows.Err()
+}
+
+func recoverCaptureNextRetryAt(now time.Time, attempts, baseSeconds, maxSeconds int) time.Time {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	if baseSeconds <= 0 {
+		baseSeconds = 1
+	}
+	if maxSeconds <= 0 {
+		maxSeconds = baseSeconds
+	}
+
+	delay := baseSeconds
+	for i := 1; i < attempts; i++ {
+		if delay >= maxSeconds/2 {
+			delay = maxSeconds
+			break
+		}
+		delay *= 2
+	}
+	if delay > maxSeconds {
+		delay = maxSeconds
+	}
+	return now.Add(time.Duration(delay) * time.Second)
 }
 
 func (s *Store) MarkCaptureProcessing(captureID string) error {

@@ -403,7 +403,7 @@ func (r *Runner) processRetryCandidates(ctx context.Context, candidates []state.
 }
 
 func (r *Runner) processReadyCaptures(ctx context.Context, res *Result) {
-	recovered, err := r.store.RecoverStuckCaptures()
+	recovered, err := r.store.RecoverStuckCaptures(time.Now(), 5*time.Minute, r.cfg.RetryBaseSeconds, r.cfg.RetryMaxSeconds)
 	if err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("recover stuck captures: %v", err))
 		res.Failed++

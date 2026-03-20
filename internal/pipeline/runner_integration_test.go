@@ -792,10 +792,12 @@ func TestProcessCapturesOnceRecoversProcessingCapture(t *testing.T) {
 		CaptureID:    "capture-5002",
 		Source:       "android-voice-inbox",
 		DeviceID:     "pixel-8a",
-		ReceivedAt:   time.Now().UTC(),
+		ReceivedAt:   time.Now().Add(-10 * time.Minute).UTC(),
 		RawAudioPath: rawPath,
 		ContentType:  "audio/ogg",
 		Status:       "processing",
+		Attempts:     1,
+		UpdatedAt:    time.Now().Add(-10 * time.Minute).UTC(),
 	}); err != nil {
 		t.Fatalf("create processing capture: %v", err)
 	}
@@ -804,7 +806,7 @@ func TestProcessCapturesOnceRecoversProcessingCapture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process captures once failed: %v", err)
 	}
-	if res.Succeeded != 1 || res.Failed != 0 {
+	if res.Succeeded != 0 || res.Failed != 0 || res.Processed != 0 {
 		t.Fatalf("unexpected result: %+v", res)
 	}
 	if recovered, ok := res.Data["recovered_captures"].(int); ok && recovered < 1 {
@@ -815,8 +817,89 @@ func TestProcessCapturesOnceRecoversProcessingCapture(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("expected recovered capture: found=%v err=%v", found, err)
 	}
+	if rec.Status != "failed" {
+		t.Fatalf("expected recovered capture to be backoff-failed, got %s", rec.Status)
+	}
+	if rec.Attempts != 2 {
+		t.Fatalf("expected attempts to increment, got %d", rec.Attempts)
+	}
+	if rec.NextRetryAt == nil || !rec.NextRetryAt.After(time.Now()) {
+		t.Fatalf("expected next retry in the future, got %+v", rec.NextRetryAt)
+	}
+
+	past := time.Now().Add(-time.Minute)
+	if err := st.MarkCaptureFailed(rec.CaptureID, rec.LastError, rec.Attempts, &past); err != nil {
+		t.Fatalf("force retry due: %v", err)
+	}
+
+	res, err = runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("expected successful recovery retry pass: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected retry result: %+v", res)
+	}
+
+	rec, found, err = st.GetCapture("capture-5002")
+	if err != nil || !found {
+		t.Fatalf("expected recovered capture after retry: found=%v err=%v", found, err)
+	}
 	if rec.Status != "done" {
-		t.Fatalf("expected done after recovery, got %s", rec.Status)
+		t.Fatalf("expected done after retry, got %s", rec.Status)
+	}
+}
+
+func TestProcessCapturesOnceLeavesFreshProcessingCaptureUntouched(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawPath := filepath.Join(cfg.AudioStoreDir, "ingest", "2026", "03", "19", "capture-fresh-processing.ogg")
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+	updatedAt := time.Now().Add(-2 * time.Minute).UTC().Truncate(time.Second)
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:    "capture-fresh-processing",
+		Source:       "android-voice-inbox",
+		DeviceID:     "pixel-8a",
+		ReceivedAt:   time.Now().UTC(),
+		RawAudioPath: rawPath,
+		ContentType:  "audio/ogg",
+		Status:       "processing",
+		Attempts:     3,
+		UpdatedAt:    updatedAt,
+	}); err != nil {
+		t.Fatalf("create processing capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures once failed: %v", err)
+	}
+	if recovered, ok := res.Data["recovered_captures"]; ok {
+		t.Fatalf("expected no recovered captures, got %+v", recovered)
+	}
+
+	rec, found, err := st.GetCapture("capture-fresh-processing")
+	if err != nil || !found {
+		t.Fatalf("expected fresh processing capture: found=%v err=%v", found, err)
+	}
+	if rec.Status != "processing" {
+		t.Fatalf("expected status to remain processing, got %s", rec.Status)
+	}
+	if rec.Attempts != 3 {
+		t.Fatalf("expected attempts unchanged, got %d", rec.Attempts)
+	}
+	if !rec.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("expected updated_at unchanged, got %s", rec.UpdatedAt)
 	}
 }
 
