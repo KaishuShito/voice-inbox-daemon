@@ -67,6 +67,59 @@ func TestCapturesPersistsFileAndRowBeforeAck(t *testing.T) {
 	if !filepathHasPrefix(capture.RawAudioPath, audioRoot) {
 		t.Fatalf("expected raw audio path inside audio root, got %s", capture.RawAudioPath)
 	}
+	if capture.TranscriptText != "" {
+		t.Fatalf("expected empty transcript_text by default, got %q", capture.TranscriptText)
+	}
+}
+
+func TestCapturesAcceptAndStoreTranscriptField(t *testing.T) {
+	srv, st, _ := newTestServer(t)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newCaptureRequestWithTranscript(t, "cap-with-transcript", "", "pixel-8a", "2026-03-19T11:00:00Z", "audio/ogg", []byte("audio-bytes"), "  hello from android  "))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	capture, found, err := st.GetCapture("cap-with-transcript")
+	if err != nil || !found {
+		t.Fatalf("expected stored capture: found=%v err=%v", found, err)
+	}
+	if capture.TranscriptText != "hello from android" {
+		t.Fatalf("expected trimmed transcript_text, got %q", capture.TranscriptText)
+	}
+}
+
+func TestCapturesBlankOrMissingTranscriptStoresNull(t *testing.T) {
+	srv, st, _ := newTestServer(t)
+
+	blankRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(blankRec, newCaptureRequestWithTranscript(t, "cap-blank-transcript", "", "pixel-8a", "2026-03-19T11:00:00Z", "audio/ogg", []byte("audio-bytes"), "   "))
+	if blankRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for blank transcript, got %d: %s", blankRec.Code, blankRec.Body.String())
+	}
+
+	missingRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(missingRec, newCaptureRequest(t, "cap-missing-transcript", "pixel-8a", "2026-03-19T11:00:00Z", "audio/ogg", []byte("audio-bytes")))
+	if missingRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for missing transcript, got %d: %s", missingRec.Code, missingRec.Body.String())
+	}
+
+	blankCapture, found, err := st.GetCapture("cap-blank-transcript")
+	if err != nil || !found {
+		t.Fatalf("expected blank transcript capture: found=%v err=%v", found, err)
+	}
+	if blankCapture.TranscriptText != "" {
+		t.Fatalf("expected blank transcript_text to round-trip as empty, got %q", blankCapture.TranscriptText)
+	}
+
+	missingCapture, found, err := st.GetCapture("cap-missing-transcript")
+	if err != nil || !found {
+		t.Fatalf("expected missing transcript capture: found=%v err=%v", found, err)
+	}
+	if missingCapture.TranscriptText != "" {
+		t.Fatalf("expected missing transcript_text to round-trip as empty, got %q", missingCapture.TranscriptText)
+	}
 }
 
 func TestCapturesAreIdempotentByCaptureID(t *testing.T) {
@@ -233,10 +286,14 @@ func newTestServer(t *testing.T) (*Server, *state.Store, string) {
 }
 
 func newCaptureRequest(t *testing.T, captureID, deviceID, capturedAt, contentType string, audio []byte) *http.Request {
-	return newCaptureRequestWithDedupeKey(t, captureID, "", deviceID, capturedAt, contentType, audio)
+	return newCaptureRequestWithTranscript(t, captureID, "", deviceID, capturedAt, contentType, audio, "")
 }
 
 func newCaptureRequestWithDedupeKey(t *testing.T, captureID, dedupeKey, deviceID, capturedAt, contentType string, audio []byte) *http.Request {
+	return newCaptureRequestWithTranscript(t, captureID, dedupeKey, deviceID, capturedAt, contentType, audio, "")
+}
+
+func newCaptureRequestWithTranscript(t *testing.T, captureID, dedupeKey, deviceID, capturedAt, contentType string, audio []byte, transcript string) *http.Request {
 	t.Helper()
 	_ = contentType
 	var body bytes.Buffer
@@ -247,6 +304,9 @@ func newCaptureRequestWithDedupeKey(t *testing.T, captureID, dedupeKey, deviceID
 	}
 	_ = writer.WriteField("device_id", deviceID)
 	_ = writer.WriteField("captured_at", capturedAt)
+	if transcript != "" {
+		_ = writer.WriteField("transcript", transcript)
+	}
 	part, err := writer.CreateFormFile("audio", "memo.ogg")
 	if err != nil {
 		t.Fatalf("create audio part: %v", err)

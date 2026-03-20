@@ -90,6 +90,7 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		dedupeKey = captureID
 	}
 	deviceID := strings.TrimSpace(r.FormValue("device_id"))
+	transcriptText := strings.TrimSpace(r.FormValue("transcript"))
 	var capturedAt *time.Time
 	if raw := strings.TrimSpace(r.FormValue("captured_at")); raw != "" {
 		parsed, err := time.Parse(time.RFC3339, raw)
@@ -143,6 +144,7 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		ReceivedAt:      receivedAt,
 		RawAudioPath:    upload.FinalPath,
 		ContentType:     upload.ContentType,
+		TranscriptText:  transcriptText,
 		Status:          "pending",
 	}
 	if err := renameFile(upload.TempPath, upload.FinalPath); err != nil {
