@@ -34,6 +34,8 @@ type persistedUpload struct {
 	ContentType string
 }
 
+var renameFile = os.Rename
+
 func NewServer(cfg config.Config, store *state.Store) *Server {
 	return &Server{cfg: cfg, store: store}
 }
@@ -143,7 +145,14 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		ContentType:     upload.ContentType,
 		Status:          "pending",
 	}
+	if err := renameFile(upload.TempPath, upload.FinalPath); err != nil {
+		http.Error(w, fmt.Sprintf("finalize upload: %v", err), http.StatusInternalServerError)
+		return
+	}
+	cleanupTemp = false
+
 	if err := s.store.CreateCapture(rec); err != nil {
+		_ = os.Remove(upload.FinalPath)
 		if existing, found, lookupErr := s.findDuplicate(captureID, dedupeKey); lookupErr == nil && found {
 			writeJSON(w, http.StatusOK, captureResponse{
 				CaptureID: existing.CaptureID,
@@ -157,11 +166,6 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("create capture: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if err := os.Rename(upload.TempPath, upload.FinalPath); err != nil {
-		http.Error(w, fmt.Sprintf("finalize upload: %v", err), http.StatusInternalServerError)
-		return
-	}
-	cleanupTemp = false
 
 	writeJSON(w, http.StatusCreated, captureResponse{
 		CaptureID: captureID,

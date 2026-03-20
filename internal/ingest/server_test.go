@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -155,6 +156,57 @@ func TestCapturesRejectInvalidCaptureID(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Fatalf("expected no stored files for invalid capture_id, got %v", files)
+	}
+}
+
+func TestCapturesRenameFailureDoesNotCreateDBRow(t *testing.T) {
+	srv, st, audioRoot := newTestServer(t)
+
+	originalRename := renameFile
+	renameFile = func(_, _ string) error {
+		return errors.New("rename failed")
+	}
+	t.Cleanup(func() {
+		renameFile = originalRename
+	})
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newCaptureRequest(t, "cap-rename-fail", "pixel-8a", "2026-03-19T11:00:00Z", "audio/ogg", []byte("audio-bytes")))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, found, err := st.GetCapture("cap-rename-fail"); err != nil {
+		t.Fatalf("lookup capture: %v", err)
+	} else if found {
+		t.Fatalf("expected no stored capture row after rename failure")
+	}
+
+	files, err := collectFiles(audioRoot)
+	if err != nil {
+		t.Fatalf("collect files: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("expected no stored files after rename failure, got %v", files)
+	}
+}
+
+func TestCapturesDBFailureCleansRenamedFile(t *testing.T) {
+	srv, st, audioRoot := newTestServer(t)
+	_ = st.Close()
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newCaptureRequest(t, "cap-db-fail", "pixel-8a", "2026-03-19T11:00:00Z", "audio/ogg", []byte("audio-bytes")))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	files, err := collectFiles(audioRoot)
+	if err != nil {
+		t.Fatalf("collect files: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("expected renamed file cleanup after DB failure, got %v", files)
 	}
 }
 
