@@ -1,8 +1,10 @@
 # voice-inbox-daemon
 
+![hero](./assets/hero.png)
+
 個人用の、ちいさな音声インボックス。
 
-Discord の `#voice-input` に投げた音声メモを、5分おきに拾って `whisper` で文字起こしし、Obsidian Journal に追記します。
+Discord の `#voice-input` に投げた音声メモを、5分おきに拾って `whisper` で文字起こしし、Obsidian Journal に追記します。Android からの HTTP 音声アップロードにも対応。
 
 ![bot avatar](./assets/bot-avatar.png)
 
