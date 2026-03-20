@@ -5,10 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs/voice-inbox-daemon"
+SERVE_LABEL="com.kai.voice-inbox.serve"
 POLL_LABEL="com.kai.voice-inbox.poll"
 CLEANUP_LABEL="com.kai.voice-inbox.cleanup"
+SERVE_TEMPLATE="$PROJECT_DIR/launchd/${SERVE_LABEL}.plist"
 POLL_TEMPLATE="$PROJECT_DIR/launchd/${POLL_LABEL}.plist"
 CLEANUP_TEMPLATE="$PROJECT_DIR/launchd/${CLEANUP_LABEL}.plist"
+SERVE_TARGET="$LAUNCH_AGENTS_DIR/${SERVE_LABEL}.plist"
 POLL_TARGET="$LAUNCH_AGENTS_DIR/${POLL_LABEL}.plist"
 CLEANUP_TARGET="$LAUNCH_AGENTS_DIR/${CLEANUP_LABEL}.plist"
 
@@ -35,6 +38,22 @@ done
   go build -o ./dist/voice-inbox ./cmd/voice-inbox
 )
 
+chmod +x "$PROJECT_DIR/scripts/run-serve.sh"
+
+python3 - "$SERVE_TEMPLATE" "$SERVE_TARGET" "$PROJECT_DIR" "$LOG_DIR" <<'PY'
+import pathlib
+import sys
+
+template = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+out_path = pathlib.Path(sys.argv[2])
+project_dir = sys.argv[3]
+log_dir = sys.argv[4]
+out_path.write_text(
+    template.replace("__PROJECT_DIR__", project_dir).replace("__LOG_DIR__", log_dir),
+    encoding="utf-8",
+)
+PY
+
 python3 - "$POLL_TEMPLATE" "$POLL_TARGET" "$PROJECT_DIR" <<'PY'
 import pathlib
 import sys
@@ -55,14 +74,18 @@ project_dir = sys.argv[3]
 out_path.write_text(template.replace("__PROJECT_DIR__", project_dir), encoding="utf-8")
 PY
 
+launchctl bootout "gui/$UID" "$SERVE_TARGET" >/dev/null 2>&1 || true
 launchctl bootout "gui/$UID" "$POLL_TARGET" >/dev/null 2>&1 || true
 launchctl bootout "gui/$UID" "$CLEANUP_TARGET" >/dev/null 2>&1 || true
 
+launchctl bootstrap "gui/$UID" "$SERVE_TARGET"
 launchctl bootstrap "gui/$UID" "$POLL_TARGET"
 launchctl bootstrap "gui/$UID" "$CLEANUP_TARGET"
 
+launchctl kickstart -k "gui/$UID/$SERVE_LABEL"
 launchctl kickstart -k "gui/$UID/$POLL_LABEL"
 
 echo "Installed launchd jobs:"
+launchctl print "gui/$UID/$SERVE_LABEL" | head -n 20 || true
 launchctl print "gui/$UID/$POLL_LABEL" | head -n 20 || true
 launchctl print "gui/$UID/$CLEANUP_LABEL" | head -n 20 || true
