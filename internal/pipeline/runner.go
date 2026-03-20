@@ -28,22 +28,23 @@ type Runner struct {
 }
 
 type processTarget struct {
-	Source         string
-	CaptureID      string
-	DeviceID       string
-	CapturedAt     *time.Time
-	Kind           CandidateKind
-	TextContent    string
-	ChannelID      string
-	MessageID      string
-	AuthorID       string
-	GuildID        string
-	JumpURL        string
-	AttachmentID   string
-	AttachmentURL  string
-	AttachmentName string
-	ContentType    string
-	RawAudioPath   string
+	Source             string
+	CaptureID          string
+	DeviceID           string
+	CapturedAt         *time.Time
+	PreTranscribedText string
+	Kind               CandidateKind
+	TextContent        string
+	ChannelID          string
+	MessageID          string
+	AuthorID           string
+	GuildID            string
+	JumpURL            string
+	AttachmentID       string
+	AttachmentURL      string
+	AttachmentName     string
+	ContentType        string
+	RawAudioPath       string
 }
 
 type processArtifacts struct {
@@ -670,13 +671,14 @@ func (r *Runner) processStoredCapture(ctx context.Context, rec state.CaptureReco
 	}
 
 	artifacts, err := r.processTarget(ctx, processTarget{
-		Source:       rec.Source,
-		CaptureID:    rec.CaptureID,
-		DeviceID:     rec.DeviceID,
-		CapturedAt:   rec.CapturedAt,
-		Kind:         kind,
-		ContentType:  rec.ContentType,
-		RawAudioPath: rec.RawAudioPath,
+		Source:             rec.Source,
+		CaptureID:          rec.CaptureID,
+		DeviceID:           rec.DeviceID,
+		CapturedAt:         rec.CapturedAt,
+		PreTranscribedText: rec.TranscriptText,
+		Kind:               kind,
+		ContentType:        rec.ContentType,
+		RawAudioPath:       rec.RawAudioPath,
 	})
 	if err != nil {
 		return false, r.scheduleCaptureFailure(rec.CaptureID, rec.Attempts, err), err
@@ -714,7 +716,15 @@ func (r *Runner) processTarget(ctx context.Context, target processTarget) (proce
 	journalAudioFile := ""
 	whisperModel := r.cfg.WhisperModel
 
-	if kind == CandidateKindText {
+	if preTranscribed := strings.TrimSpace(target.PreTranscribedText); preTranscribed != "" {
+		transcriptText = preTranscribed
+		whisperModel = "gpt-4o-mini-transcribe"
+		if strings.TrimSpace(audioPath) != "" {
+			journalAudioFile = relativeOrSelf(audioPath, r.cfg.AudioStoreDir)
+		} else {
+			journalAudioFile = "(text-only)"
+		}
+	} else if kind == CandidateKindText {
 		transcriptText = strings.TrimSpace(target.TextContent)
 		whisperModel = "direct-text"
 		journalAudioFile = "(text-only)"

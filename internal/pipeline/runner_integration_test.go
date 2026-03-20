@@ -625,6 +625,72 @@ func TestProcessCapturesOnceProcessesPendingCapture(t *testing.T) {
 	}
 }
 
+func TestProcessCapturesOnceUsesPreTranscribedTextAndSkipsWhisper(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	cfg.WhisperBin = filepath.Join(t.TempDir(), "missing-whisper")
+	runner = New(
+		cfg,
+		st,
+		discord.NewWithBaseURL(cfg.DiscordBotToken, cfg.DiscordAPIBaseURL),
+		obsidian.New(cfg.ObsidianBaseURL, cfg.ObsidianAuthHeader, cfg.ObsidianAPIKey, cfg.ObsidianVerifyTLS),
+	)
+
+	rawPath := filepath.Join(cfg.AudioStoreDir, "ingest", "2026", "03", "19", "capture-pretranscribed.ogg")
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:      "capture-pretranscribed",
+		Source:         "android-voice-inbox",
+		DeviceID:       "pixel-8a",
+		ReceivedAt:     time.Now().UTC(),
+		RawAudioPath:   rawPath,
+		ContentType:    "audio/ogg",
+		TranscriptText: "Android already transcribed this",
+		Status:         "pending",
+	}); err != nil {
+		t.Fatalf("create capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures once failed: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	rec, found, err := st.GetCapture("capture-pretranscribed")
+	if err != nil || !found {
+		t.Fatalf("expected stored capture: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected done status, got %s", rec.Status)
+	}
+	if rec.TranscriptPath != "" {
+		t.Fatalf("expected no whisper transcript artifact for pre-transcribed capture, got %q", rec.TranscriptPath)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	content := om.files[journalPath]
+	if !strings.Contains(content, "Android already transcribed this") {
+		t.Fatalf("journal should include pre-transcribed text")
+	}
+	if !strings.Contains(content, `whisper_model: "gpt-4o-mini-transcribe"`) {
+		t.Fatalf("journal should record gpt-4o-mini-transcribe metadata")
+	}
+}
+
 func TestProcessCapturesOnceTreatsStoredRawFileAsAudioDespiteTextMime(t *testing.T) {
 	dm := newDiscordMock(t)
 	defer dm.close()
@@ -676,6 +742,64 @@ func TestProcessCapturesOnceTreatsStoredRawFileAsAudioDespiteTextMime(t *testing
 	}
 	if !strings.Contains(content, `audio_file: "ingest/2026/03/19/capture-plain-text.bin"`) {
 		t.Fatalf("journal should include stored raw audio path, got %s", content)
+	}
+}
+
+func TestProcessCapturesOnceBlankTranscriptFallsBackToWhisper(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawPath := filepath.Join(cfg.AudioStoreDir, "ingest", "2026", "03", "19", "capture-blank-transcript.ogg")
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:      "capture-blank-transcript",
+		Source:         "android-voice-inbox",
+		DeviceID:       "pixel-8a",
+		ReceivedAt:     time.Now().UTC(),
+		RawAudioPath:   rawPath,
+		ContentType:    "audio/ogg",
+		TranscriptText: "   ",
+		Status:         "pending",
+	}); err != nil {
+		t.Fatalf("create capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures once failed: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	rec, found, err := st.GetCapture("capture-blank-transcript")
+	if err != nil || !found {
+		t.Fatalf("expected stored capture: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected done status, got %s", rec.Status)
+	}
+	if rec.TranscriptPath == "" {
+		t.Fatalf("expected whisper transcript artifact for blank transcript fallback")
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	content := om.files[journalPath]
+	if !strings.Contains(content, "テスト文字起こし") {
+		t.Fatalf("journal should include whisper transcript")
+	}
+	if !strings.Contains(content, `whisper_model: "large-v3-turbo"`) {
+		t.Fatalf("journal should include whisper model for fallback path")
 	}
 }
 
