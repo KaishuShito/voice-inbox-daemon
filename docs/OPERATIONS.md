@@ -21,6 +21,25 @@ launchctl print "gui/$UID/com.kai.voice-inbox.poll" | head -n 40
 "$PROJECT_DIR/dist/voice-inbox" retry --json
 ```
 
+通常は `poll` が5分ごとに retry due を自動で吸い上げます。`retry` は即時に回復させたい時の手動実行用です。
+
+## HTTP ingest / serve
+
+Android Voice Inbox の backend として使う時は `serve` を起動します。
+
+```bash
+INGEST_AUTH_TOKEN=... \
+INGEST_LISTEN_ADDR=127.0.0.1:8787 \
+"$PROJECT_DIR/dist/voice-inbox" serve
+```
+
+追加の ingest env:
+
+- `INGEST_MAX_BODY_MB` 既定 `32`
+- `INGEST_SOURCE_NAME` 既定 `android-voice-inbox`
+
+`serve` は `POST /v0/captures` を受け付け、raw file 保存と SQLite の durable registration の両方が終わるまで成功を返しません。
+
 ## トラブル時の確認順
 
 1. `doctor` 実行

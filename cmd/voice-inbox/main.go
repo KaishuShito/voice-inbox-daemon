@@ -3,14 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"voice-inbox-daemon/internal/config"
 	"voice-inbox-daemon/internal/discord"
+	"voice-inbox-daemon/internal/ingest"
 	"voice-inbox-daemon/internal/obsidian"
 	"voice-inbox-daemon/internal/pipeline"
 	"voice-inbox-daemon/internal/state"
@@ -33,7 +38,7 @@ func run() int {
 		return 0
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadForCommand(cmd)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		return 1
@@ -73,6 +78,8 @@ func run() int {
 		return runCleanup(runner, os.Args[2:])
 	case "status":
 		return runStatus(runner, os.Args[2:])
+	case "serve":
+		return runServe(runner, store, cfg, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		printUsage()
@@ -175,6 +182,57 @@ func runStatus(runner *pipeline.Runner, args []string) int {
 	return 0
 }
 
+func runServe(runner *pipeline.Runner, store *state.Store, cfg config.Config, args []string) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+
+	server := ingest.NewServer(cfg, store)
+	httpServer := &http.Server{
+		Addr:              cfg.IngestListenAddr,
+		Handler:           server.Handler(),
+		ReadHeaderTimeout: 15 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			runCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+			res, err := runner.ProcessCapturesOnce(runCtx)
+			cancel()
+			if err != nil && (res.Processed > 0 || len(res.Errors) > 0) {
+				fmt.Fprintf(os.Stderr, "capture processor error: %v\n", err)
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+	}()
+
+	fmt.Fprintf(os.Stdout, "listening on %s\n", cfg.IngestListenAddr)
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		fmt.Fprintf(os.Stderr, "serve error: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func printResult(res pipeline.Result, asJSON bool) {
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -230,6 +288,7 @@ Usage:
   voice-inbox retry [--json]
   voice-inbox cleanup [--json]
   voice-inbox status [--json]
+  voice-inbox serve
 `
 	_, _ = fmt.Fprint(os.Stderr, msg)
 }

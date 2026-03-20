@@ -26,6 +26,31 @@ type Runner struct {
 	obsidian *obsidian.Client
 }
 
+type processTarget struct {
+	Source         string
+	CaptureID      string
+	DeviceID       string
+	CapturedAt     *time.Time
+	Kind           CandidateKind
+	TextContent    string
+	ChannelID      string
+	MessageID      string
+	AuthorID       string
+	GuildID        string
+	JumpURL        string
+	AttachmentID   string
+	AttachmentURL  string
+	AttachmentName string
+	ContentType    string
+	RawAudioPath   string
+}
+
+type processArtifacts struct {
+	JournalPath    string
+	RawAudioPath   string
+	TranscriptPath string
+}
+
 func New(cfg config.Config, store *state.Store, discordClient *discord.Client, obsidianClient *obsidian.Client) *Runner {
 	return &Runner{
 		cfg:      cfg,
@@ -206,6 +231,15 @@ func (r *Runner) PollOnce(ctx context.Context) (Result, error) {
 		}
 	}
 
+	retryCandidates, err := r.store.ListRetryCandidates(time.Now(), r.cfg.DiscordFetchLimit)
+	if err != nil {
+		res.Errors = append(res.Errors, fmt.Sprintf("list retry candidates: %v", err))
+		res.Failed++
+	} else {
+		r.processRetryCandidates(ctx, retryCandidates, &res)
+	}
+	r.processReadyCaptures(ctx, &res)
+
 	finalizeResult(&res, started)
 	if res.Failed > 0 {
 		return res, errors.New("poll completed with failures")
@@ -246,6 +280,51 @@ func (r *Runner) Retry(ctx context.Context) (Result, error) {
 		return res, err
 	}
 
+	r.processRetryCandidates(ctx, candidates, &res)
+	r.processReadyCaptures(ctx, &res)
+
+	finalizeResult(&res, started)
+	if res.Failed > 0 {
+		return res, errors.New("retry completed with failures")
+	}
+	return res, nil
+}
+
+func (r *Runner) ProcessCapturesOnce(ctx context.Context) (Result, error) {
+	started := time.Now()
+	res := Result{Command: "serve-process-captures"}
+
+	lock, err := state.AcquireFileLock(r.cfg.LockFilePath)
+	if err != nil {
+		res.Errors = append(res.Errors, err.Error())
+		res.Failed = 1
+		finalizeResult(&res, started)
+		return res, err
+	}
+	defer lock.Release()
+
+	runID, err := r.store.BeginRun("serve-process-captures", started)
+	if err != nil {
+		res.Errors = append(res.Errors, err.Error())
+		res.Failed = 1
+		finalizeResult(&res, started)
+		return res, err
+	}
+	res.RunID = runID
+	defer func() {
+		_ = r.store.FinishRun(runID, time.Now(), res.Processed, res.Succeeded, res.Failed)
+	}()
+
+	r.processReadyCaptures(ctx, &res)
+
+	finalizeResult(&res, started)
+	if res.Failed > 0 {
+		return res, errors.New("capture processing completed with failures")
+	}
+	return res, nil
+}
+
+func (r *Runner) processRetryCandidates(ctx context.Context, candidates []state.MessageRecord, res *Result) {
 	for _, rec := range candidates {
 		res.Processed++
 		if rec.Status == "reaction_pending" {
@@ -321,12 +400,47 @@ func (r *Runner) Retry(ctx context.Context) (Result, error) {
 			res.Succeeded++
 		}
 	}
+}
 
-	finalizeResult(&res, started)
-	if res.Failed > 0 {
-		return res, errors.New("retry completed with failures")
+func (r *Runner) processReadyCaptures(ctx context.Context, res *Result) {
+	recovered, err := r.store.RecoverStuckCaptures()
+	if err != nil {
+		res.Errors = append(res.Errors, fmt.Sprintf("recover stuck captures: %v", err))
+		res.Failed++
+		return
 	}
-	return res, nil
+	if recovered > 0 {
+		res.Data = ensureData(res.Data)
+		res.Data["recovered_captures"] = recovered
+	}
+
+	captures, err := r.store.ListCapturesForProcessing(time.Now(), r.cfg.DiscordFetchLimit)
+	if err != nil {
+		res.Errors = append(res.Errors, fmt.Sprintf("list captures for processing: %v", err))
+		res.Failed++
+		return
+	}
+	for _, rec := range captures {
+		res.Processed++
+		if err := r.store.MarkCaptureProcessing(rec.CaptureID); err != nil {
+			res.Failed++
+			res.Errors = append(res.Errors, fmt.Sprintf("capture %s mark processing: %v", rec.CaptureID, err))
+			continue
+		}
+
+		succeeded, requeued, procErr := r.processStoredCapture(ctx, rec)
+		if procErr != nil {
+			res.Failed++
+			if requeued {
+				res.Requeued++
+			}
+			res.Errors = append(res.Errors, fmt.Sprintf("capture %s: %v", rec.CaptureID, procErr))
+			continue
+		}
+		if succeeded {
+			res.Succeeded++
+		}
+	}
 }
 
 func (r *Runner) Cleanup(ctx context.Context) (Result, error) {
@@ -413,6 +527,67 @@ func (r *Runner) Cleanup(ctx context.Context) (Result, error) {
 
 	res.Data["audio_removed"] = audioRemoved
 	res.Data["transcript_removed"] = transcriptRemoved
+
+	captureAudioRows, err := r.store.ListDoneCapturesWithAudioBefore(audioCutoff, 1000)
+	if err != nil {
+		res.Failed++
+		res.Errors = append(res.Errors, fmt.Sprintf("list capture audio cleanup rows: %v", err))
+		finalizeResult(&res, started)
+		return res, err
+	}
+
+	captureAudioRemoved := 0
+	for _, rec := range captureAudioRows {
+		if rec.RawAudioPath == "" {
+			continue
+		}
+		res.Processed++
+		err := safeRemoveWithin(rec.RawAudioPath, r.cfg.AudioStoreDir)
+		if err != nil && !os.IsNotExist(err) {
+			res.Failed++
+			res.Errors = append(res.Errors, fmt.Sprintf("remove capture audio %s: %v", rec.RawAudioPath, err))
+			continue
+		}
+		if err := r.store.ClearCaptureAudioPath(rec.CaptureID); err != nil {
+			res.Failed++
+			res.Errors = append(res.Errors, fmt.Sprintf("clear capture audio path for %s: %v", rec.CaptureID, err))
+			continue
+		}
+		captureAudioRemoved++
+		res.Succeeded++
+	}
+
+	captureTranscriptRows, err := r.store.ListDoneCapturesWithTranscriptBefore(transcriptCutoff, 1000)
+	if err != nil {
+		res.Failed++
+		res.Errors = append(res.Errors, fmt.Sprintf("list capture transcript cleanup rows: %v", err))
+		finalizeResult(&res, started)
+		return res, err
+	}
+
+	captureTranscriptRemoved := 0
+	for _, rec := range captureTranscriptRows {
+		if rec.TranscriptPath == "" {
+			continue
+		}
+		res.Processed++
+		err := safeRemoveWithin(rec.TranscriptPath, r.cfg.AudioStoreDir)
+		if err != nil && !os.IsNotExist(err) {
+			res.Failed++
+			res.Errors = append(res.Errors, fmt.Sprintf("remove capture transcript %s: %v", rec.TranscriptPath, err))
+			continue
+		}
+		if err := r.store.ClearCaptureTranscriptPath(rec.CaptureID); err != nil {
+			res.Failed++
+			res.Errors = append(res.Errors, fmt.Sprintf("clear capture transcript path for %s: %v", rec.CaptureID, err))
+			continue
+		}
+		captureTranscriptRemoved++
+		res.Succeeded++
+	}
+
+	res.Data["capture_audio_removed"] = captureAudioRemoved
+	res.Data["capture_transcript_removed"] = captureTranscriptRemoved
 	finalizeResult(&res, started)
 	if res.Failed > 0 {
 		return res, errors.New("cleanup completed with failures")
@@ -438,43 +613,121 @@ func (r *Runner) Status(_ context.Context) (Result, error) {
 }
 
 func (r *Runner) processCandidate(ctx context.Context, c Candidate, previousAttempts int) (bool, bool, error) {
-	now := time.Now()
+	artifacts, err := r.processTarget(ctx, processTarget{
+		Source:         "discord",
+		CaptureID:      c.Message.ID,
+		Kind:           c.Kind,
+		TextContent:    c.Message.Content,
+		ChannelID:      c.Message.ChannelID,
+		MessageID:      c.Message.ID,
+		AuthorID:       c.Message.Author.ID,
+		GuildID:        c.Message.GuildID,
+		JumpURL:        c.JumpURL,
+		AttachmentID:   c.Attachment.ID,
+		AttachmentURL:  c.Attachment.URL,
+		AttachmentName: c.Attachment.Filename,
+		ContentType:    c.Attachment.ContentType,
+	})
+	if err != nil {
+		return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+	}
+
 	jumpURL := c.JumpURL
 	if jumpURL == "" && c.Message.GuildID != "" {
 		jumpURL = journal.DiscordJumpURL(c.Message.GuildID, c.Message.ChannelID, c.Message.ID)
 	}
 
-	kind := c.Kind
+	if err := r.discord.AddReaction(ctx, c.Message.ChannelID, c.Message.ID, checkMarkEmojiEscaped); err != nil {
+		attempts := previousAttempts + 1
+		next := NextRetryAt(time.Now(), attempts, r.cfg.RetryBaseSeconds, r.cfg.RetryMaxSeconds)
+		markErr := r.store.MarkReactionPending(
+			c.Message.ID,
+			err.Error(),
+			attempts,
+			next,
+			artifacts.JournalPath,
+			artifacts.RawAudioPath,
+			artifacts.TranscriptPath,
+			jumpURL,
+		)
+		if markErr != nil {
+			return false, true, fmt.Errorf("reaction failed: %v; and mark reaction_pending failed: %w", err, markErr)
+		}
+		return false, true, fmt.Errorf("reaction failed: %w", err)
+	}
+
+	if err := r.store.MarkDone(c.Message.ID, artifacts.JournalPath, artifacts.RawAudioPath, artifacts.TranscriptPath, jumpURL); err != nil {
+		return false, false, err
+	}
+	return true, false, nil
+}
+
+func (r *Runner) processStoredCapture(ctx context.Context, rec state.CaptureRecord) (bool, bool, error) {
+	artifacts, err := r.processTarget(ctx, processTarget{
+		Source:       rec.Source,
+		CaptureID:    rec.CaptureID,
+		DeviceID:     rec.DeviceID,
+		CapturedAt:   rec.CapturedAt,
+		Kind:         kindFromContentType(rec.ContentType),
+		ContentType:  rec.ContentType,
+		RawAudioPath: rec.RawAudioPath,
+	})
+	if err != nil {
+		return false, r.scheduleCaptureFailure(rec.CaptureID, rec.Attempts, err), err
+	}
+	if err := r.store.MarkCaptureDone(rec.CaptureID, artifacts.JournalPath, artifacts.TranscriptPath); err != nil {
+		return false, false, err
+	}
+	return true, false, nil
+}
+
+func (r *Runner) processTarget(ctx context.Context, target processTarget) (processArtifacts, error) {
+	now := time.Now()
+	jumpURL := target.JumpURL
+	if jumpURL == "" && target.GuildID != "" && target.ChannelID != "" && target.MessageID != "" {
+		jumpURL = journal.DiscordJumpURL(target.GuildID, target.ChannelID, target.MessageID)
+	}
+
+	kind := target.Kind
 	if kind == "" {
-		kind = kindFromContentType(c.Attachment.ContentType)
-		if kind == "" && strings.TrimSpace(c.Message.Content) != "" {
+		kind = kindFromContentType(target.ContentType)
+		if kind == "" && strings.TrimSpace(target.TextContent) != "" {
 			kind = CandidateKindText
 		}
+	}
+	if kind == "" {
+		return processArtifacts{}, errors.New("unsupported capture kind")
 	}
 
 	var transcriptText string
 	transcriptPath := ""
-	audioPath := ""
+	audioPath := target.RawAudioPath
 	journalAudioFile := ""
 	whisperModel := r.cfg.WhisperModel
 
-	subdir := now.Format("2006/01/02")
-	prefix := fmt.Sprintf("%s_%s", c.Message.ID, c.Attachment.ID)
-	origPath := filepath.Join(r.cfg.AudioStoreDir, subdir, prefix+".orig")
-	wavPath := filepath.Join(r.cfg.AudioStoreDir, subdir, prefix+".wav")
-	transcriptDir := filepath.Join(r.cfg.AudioStoreDir, subdir, "transcripts")
-
 	if kind == CandidateKindText {
-		transcriptText = strings.TrimSpace(c.Message.Content)
+		transcriptText = strings.TrimSpace(target.TextContent)
 		whisperModel = "direct-text"
 		journalAudioFile = "(text-only)"
 	} else {
-		if err := r.discord.DownloadAttachment(ctx, c.Attachment.URL, origPath); err != nil {
-			return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+		origPath := target.RawAudioPath
+		if strings.TrimSpace(origPath) == "" {
+			subdir := now.Format("2006/01/02")
+			prefix := fmt.Sprintf("%s_%s", target.CaptureID, target.AttachmentID)
+			origPath = filepath.Join(r.cfg.AudioStoreDir, subdir, prefix+".orig")
+			if err := r.discord.DownloadAttachment(ctx, target.AttachmentURL, origPath); err != nil {
+				return processArtifacts{}, err
+			}
+			audioPath = origPath
 		}
 
+		baseDir := filepath.Dir(origPath)
+		baseName := strings.TrimSuffix(filepath.Base(origPath), filepath.Ext(origPath))
+		wavPath := filepath.Join(baseDir, baseName+".wav")
+		transcriptDir := filepath.Join(baseDir, "transcripts")
+
 		if err := transcribe.NormalizeToWav(ctx, r.cfg.FFmpegBin, origPath, wavPath); err != nil {
-			return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+			return processArtifacts{}, err
 		}
 
 		txCtx, cancel := transcribe.ContextWithTranscriptionTimeout(ctx)
@@ -487,78 +740,63 @@ func (r *Runner) processCandidate(ctx context.Context, c Candidate, previousAtte
 			transcriptDir,
 		)
 		if err != nil {
-			return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+			return processArtifacts{}, err
 		}
 		transcriptText = txRes.Text
 		transcriptPath = txRes.TranscriptJSON
-		audioPath = origPath
 		journalAudioFile = relativeOrSelf(origPath, r.cfg.AudioStoreDir)
 	}
 
 	journalPath := journal.FilePath(r.cfg.VaultJournalDir, now)
 	exists, err := r.obsidian.FileExists(ctx, journalPath)
 	if err != nil {
-		return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+		return processArtifacts{}, err
 	}
 	if !exists {
 		if err := r.obsidian.CreateFile(ctx, journalPath, journal.NewJournalContent(now)); err != nil {
-			return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+			return processArtifacts{}, err
 		}
 	}
 
 	entry := journal.BuildEntry(journal.EntryInput{
 		Now:          now,
 		Transcript:   transcriptText,
-		ChannelID:    c.Message.ChannelID,
-		MessageID:    c.Message.ID,
-		AuthorID:     c.Message.Author.ID,
+		Source:       target.Source,
+		CaptureID:    target.CaptureID,
+		DeviceID:     target.DeviceID,
+		CapturedAt:   target.CapturedAt,
+		ChannelID:    target.ChannelID,
+		MessageID:    target.MessageID,
+		AuthorID:     target.AuthorID,
 		JumpURL:      jumpURL,
 		AudioFile:    journalAudioFile,
 		WhisperModel: whisperModel,
 		ProcessedAt:  time.Now(),
 	})
 
-	alreadyLogged, err := r.journalContainsMessage(ctx, journalPath, c.Message.ID)
+	alreadyLogged, err := r.journalContainsCapture(ctx, journalPath, target.CaptureID)
 	if err != nil {
-		return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+		return processArtifacts{}, err
 	}
 	if !alreadyLogged {
 		if err := r.obsidian.AppendFile(ctx, journalPath, entry); err != nil {
-			return false, r.scheduleFailure(c.Message.ID, previousAttempts, err), err
+			return processArtifacts{}, err
 		}
 	}
 
-	if err := r.discord.AddReaction(ctx, c.Message.ChannelID, c.Message.ID, checkMarkEmojiEscaped); err != nil {
-		attempts := previousAttempts + 1
-		next := NextRetryAt(time.Now(), attempts, r.cfg.RetryBaseSeconds, r.cfg.RetryMaxSeconds)
-		markErr := r.store.MarkReactionPending(
-			c.Message.ID,
-			err.Error(),
-			attempts,
-			next,
-			journalPath,
-			audioPath,
-			transcriptPath,
-			jumpURL,
-		)
-		if markErr != nil {
-			return false, true, fmt.Errorf("reaction failed: %v; and mark reaction_pending failed: %w", err, markErr)
-		}
-		return false, true, fmt.Errorf("reaction failed: %w", err)
-	}
-
-	if err := r.store.MarkDone(c.Message.ID, journalPath, audioPath, transcriptPath, jumpURL); err != nil {
-		return false, false, err
-	}
-	return true, false, nil
+	return processArtifacts{
+		JournalPath:    journalPath,
+		RawAudioPath:   audioPath,
+		TranscriptPath: transcriptPath,
+	}, nil
 }
 
-func (r *Runner) journalContainsMessage(ctx context.Context, journalPath, messageID string) (bool, error) {
+func (r *Runner) journalContainsCapture(ctx context.Context, journalPath, captureID string) (bool, error) {
 	content, err := r.obsidian.ReadFile(ctx, journalPath)
 	if err != nil {
 		return false, err
 	}
-	marker := fmt.Sprintf("discord_message_id: \"%s\"", messageID)
+	marker := fmt.Sprintf("capture_id: \"%s\"", captureID)
 	return strings.Contains(content, marker), nil
 }
 
@@ -570,6 +808,17 @@ func (r *Runner) scheduleFailure(messageID string, previousAttempts int, process
 	}
 	next := NextRetryAt(time.Now(), attempts, r.cfg.RetryBaseSeconds, r.cfg.RetryMaxSeconds)
 	_ = r.store.MarkFailed(messageID, processErr.Error(), attempts, &next)
+	return true
+}
+
+func (r *Runner) scheduleCaptureFailure(captureID string, previousAttempts int, processErr error) bool {
+	attempts := previousAttempts + 1
+	if attempts >= r.cfg.MaxRetryAttempts {
+		_ = r.store.MarkCaptureFailed(captureID, processErr.Error(), attempts, nil)
+		return false
+	}
+	next := NextRetryAt(time.Now(), attempts, r.cfg.RetryBaseSeconds, r.cfg.RetryMaxSeconds)
+	_ = r.store.MarkCaptureFailed(captureID, processErr.Error(), attempts, &next)
 	return true
 }
 
@@ -598,6 +847,13 @@ func relativeOrSelf(targetPath, baseDir string) string {
 		return targetPath
 	}
 	return rel
+}
+
+func ensureData(data map[string]any) map[string]any {
+	if data == nil {
+		return map[string]any{}
+	}
+	return data
 }
 
 func kindFromContentType(contentType string) CandidateKind {

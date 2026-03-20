@@ -390,6 +390,55 @@ func TestPollOnceObsidianAppendFailure(t *testing.T) {
 	}
 }
 
+func TestPollOnceProcessesDueRetries(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+	om.appendFail = true
+
+	dm.messages = []discord.Message{makeMessage(dm.server.URL, "2501")}
+	runner, st, _, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	res, err := runner.PollOnce(context.Background())
+	if err == nil {
+		t.Fatalf("expected initial poll failure")
+	}
+	if res.Failed != 1 || res.Requeued != 1 {
+		t.Fatalf("unexpected initial result: %+v", res)
+	}
+
+	rec, found, err := st.GetMessage("2501")
+	if err != nil || !found {
+		t.Fatalf("expected stored message after initial failure: found=%v err=%v", found, err)
+	}
+
+	past := time.Now().Add(-time.Minute)
+	if err := st.MarkFailed(rec.MessageID, rec.LastError, rec.Attempts, &past); err != nil {
+		t.Fatalf("force retry due: %v", err)
+	}
+
+	om.appendFail = false
+	dm.messages = nil
+
+	res, err = runner.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("poll should drain due retries: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected retry-draining result: %+v", res)
+	}
+
+	rec, found, err = st.GetMessage("2501")
+	if err != nil || !found {
+		t.Fatalf("expected retried message: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected done after due retry, got %s", rec.Status)
+	}
+}
+
 func TestPollOnceReactionFailureGoesReactionPending(t *testing.T) {
 	dm := newDiscordMock(t)
 	defer dm.close()
@@ -456,5 +505,307 @@ func TestPollOnceTextMessage(t *testing.T) {
 	}
 	if !strings.Contains(om.files[journalPath], `whisper_model: "direct-text"`) {
 		t.Fatalf("journal should include direct-text marker")
+	}
+}
+
+func TestProcessCapturesOnceAppendsJournalAndMarksDone(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	audioPath := filepath.Join(cfg.AudioStoreDir, "ingest", "memo.m4a")
+	if err := os.MkdirAll(filepath.Dir(audioPath), 0o755); err != nil {
+		t.Fatalf("mkdir capture dir: %v", err)
+	}
+	if err := os.WriteFile(audioPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write capture audio: %v", err)
+	}
+
+	capturedAt := time.Now().Add(-2 * time.Minute).UTC()
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:       "cap-1001",
+		Source:          "android-voice-inbox",
+		SourceDedupeKey: "cap-1001",
+		DeviceID:        "pixel-8a",
+		CapturedAt:      &capturedAt,
+		ReceivedAt:      time.Now().UTC(),
+		RawAudioPath:    audioPath,
+		ContentType:     "audio/mp4",
+		Status:          "pending",
+	}); err != nil {
+		t.Fatalf("create capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures once failed: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	rec, found, err := st.GetCapture("cap-1001")
+	if err != nil || !found {
+		t.Fatalf("expected stored capture: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected done status, got %s", rec.Status)
+	}
+	if rec.JournalPath == "" || rec.TranscriptPath == "" {
+		t.Fatalf("expected journal and transcript artifacts, got %+v", rec)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	content := om.files[journalPath]
+	if !strings.Contains(content, `capture_id: "cap-1001"`) {
+		t.Fatalf("journal should include capture id metadata")
+	}
+	if !strings.Contains(content, `source: "android-voice-inbox"`) {
+		t.Fatalf("journal should include capture source metadata")
+	}
+}
+
+func TestProcessCapturesOnceProcessesPendingCapture(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawPath := filepath.Join(cfg.AudioStoreDir, "ingest", "2026", "03", "19", "capture-5001.ogg")
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+	capturedAt := time.Date(2026, 3, 19, 11, 0, 0, 0, time.UTC)
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:    "capture-5001",
+		Source:       "android-voice-inbox",
+		DeviceID:     "pixel-8a",
+		CapturedAt:   &capturedAt,
+		ReceivedAt:   time.Now().UTC(),
+		RawAudioPath: rawPath,
+		ContentType:  "audio/ogg",
+		Status:       "pending",
+	}); err != nil {
+		t.Fatalf("create capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures once failed: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	rec, found, err := st.GetCapture("capture-5001")
+	if err != nil || !found {
+		t.Fatalf("expected stored capture: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected done status, got %s", rec.Status)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	content := om.files[journalPath]
+	if !strings.Contains(content, `capture_id: "capture-5001"`) {
+		t.Fatalf("journal should include capture marker")
+	}
+	if !strings.Contains(content, "テスト文字起こし") {
+		t.Fatalf("journal should include transcript")
+	}
+}
+
+func TestProcessCapturesOnceRecoversProcessingCapture(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawPath := filepath.Join(cfg.AudioStoreDir, "ingest", "2026", "03", "19", "capture-5002.ogg")
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:    "capture-5002",
+		Source:       "android-voice-inbox",
+		DeviceID:     "pixel-8a",
+		ReceivedAt:   time.Now().UTC(),
+		RawAudioPath: rawPath,
+		ContentType:  "audio/ogg",
+		Status:       "processing",
+	}); err != nil {
+		t.Fatalf("create processing capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures once failed: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if recovered, ok := res.Data["recovered_captures"].(int); ok && recovered < 1 {
+		t.Fatalf("expected recovered captures > 0, got %+v", res.Data)
+	}
+
+	rec, found, err := st.GetCapture("capture-5002")
+	if err != nil || !found {
+		t.Fatalf("expected recovered capture: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected done after recovery, got %s", rec.Status)
+	}
+}
+
+func TestProcessCapturesOnceSuccessAndNoDuplicateJournalAppend(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawDir := filepath.Join(cfg.AudioStoreDir, "http", "2026", "03", "19")
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	rawPath := filepath.Join(rawDir, "cap-2001.ogg")
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+
+	capturedAt := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:       "cap-2001",
+		Source:          "android-voice-inbox",
+		SourceDedupeKey: "cap-2001",
+		DeviceID:        "pixel-8a",
+		CapturedAt:      &capturedAt,
+		ReceivedAt:      time.Now().UTC(),
+		RawAudioPath:    rawPath,
+		ContentType:     "audio/ogg",
+		Status:          "pending",
+	}); err != nil {
+		t.Fatalf("create capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures failed: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	rec, found, err := st.GetCapture("cap-2001")
+	if err != nil || !found {
+		t.Fatalf("expected stored capture: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected capture done, got %s", rec.Status)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	if !strings.Contains(om.files[journalPath], `capture_id: "cap-2001"`) {
+		t.Fatalf("journal should include capture marker")
+	}
+	appendHits := om.appendHits
+
+	res, err = runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("second capture processing pass should succeed: %v", err)
+	}
+	if res.Succeeded != 0 || om.appendHits != appendHits {
+		t.Fatalf("expected no duplicate append, result=%+v appendHits=%d", res, om.appendHits)
+	}
+}
+
+func TestProcessCapturesOnceRetriesFailedCapture(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+	om.appendFail = true
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawDir := filepath.Join(cfg.AudioStoreDir, "http", "2026", "03", "19")
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	rawPath := filepath.Join(rawDir, "cap-3001.ogg")
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+
+	capturedAt := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:       "cap-3001",
+		Source:          "android-voice-inbox",
+		SourceDedupeKey: "cap-3001",
+		DeviceID:        "pixel-8a",
+		CapturedAt:      &capturedAt,
+		ReceivedAt:      time.Now().UTC(),
+		RawAudioPath:    rawPath,
+		ContentType:     "audio/ogg",
+		Status:          "pending",
+	}); err != nil {
+		t.Fatalf("create capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err == nil {
+		t.Fatalf("expected failed processing pass")
+	}
+	if res.Failed != 1 || res.Requeued != 1 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	rec, found, err := st.GetCapture("cap-3001")
+	if err != nil || !found {
+		t.Fatalf("expected stored capture after failure: found=%v err=%v", found, err)
+	}
+	if rec.Status != "failed" || rec.NextRetryAt == nil {
+		t.Fatalf("expected failed capture with retry, got %+v", rec)
+	}
+
+	past := time.Now().Add(-time.Minute)
+	if err := st.MarkCaptureFailed(rec.CaptureID, rec.LastError, rec.Attempts, &past); err != nil {
+		t.Fatalf("force retry due: %v", err)
+	}
+	om.appendFail = false
+
+	res, err = runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("expected successful recovery pass: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected retry result: %+v", res)
+	}
+
+	rec, found, err = st.GetCapture("cap-3001")
+	if err != nil || !found {
+		t.Fatalf("expected stored capture after retry: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected done after retry, got %s", rec.Status)
 	}
 }

@@ -36,9 +36,17 @@ type Config struct {
 	AudioStoreDir           string
 	LogDir                  string
 	LockFilePath            string
+	IngestListenAddr        string
+	IngestAuthToken         string
+	IngestMaxBodyMB         int
+	IngestSourceName        string
 }
 
 func Load() (Config, error) {
+	return LoadForCommand("")
+}
+
+func LoadForCommand(command string) (Config, error) {
 	_ = loadDotEnv(".env")
 
 	home, err := os.UserHomeDir()
@@ -73,33 +81,47 @@ func Load() (Config, error) {
 		StateDBPath:             expandPath(getEnvDefault("STATE_DB_PATH", stateDefault), home),
 		AudioStoreDir:           expandPath(getEnvDefault("AUDIO_STORE_DIR", audioDefault), home),
 		LogDir:                  expandPath(getEnvDefault("LOG_DIR", logDefault), home),
+		IngestListenAddr:        getEnvDefault("INGEST_LISTEN_ADDR", "127.0.0.1:8787"),
+		IngestAuthToken:         strings.TrimSpace(os.Getenv("INGEST_AUTH_TOKEN")),
+		IngestMaxBodyMB:         getEnvInt("INGEST_MAX_BODY_MB", 32),
+		IngestSourceName:        getEnvDefault("INGEST_SOURCE_NAME", "android-voice-inbox"),
 	}
 
 	allowedRaw := getEnvDefault("VOICE_INBOX_ALLOWED_AUTHOR_IDS", "968754117885456425")
 	cfg.AllowedAuthorIDs, cfg.AllowedAuthorIDsList = parseCSVSet(allowedRaw)
 	cfg.LockFilePath = cfg.StateDBPath + ".lock"
 
-	if err := validate(cfg); err != nil {
+	if err := validate(cfg, command); err != nil {
 		return Config{}, err
 	}
 
 	return cfg, nil
 }
 
-func validate(cfg Config) error {
+func validate(cfg Config, command string) error {
 	var problems []string
 
-	if cfg.DiscordBotToken == "" {
-		problems = append(problems, "DISCORD_BOT_TOKEN is required")
+	if command != "serve" {
+		if cfg.DiscordBotToken == "" {
+			problems = append(problems, "DISCORD_BOT_TOKEN is required")
+		}
+		if cfg.VoiceInboxChannelID == "" {
+			problems = append(problems, "VOICE_INBOX_CHANNEL_ID is required")
+		}
+		if cfg.DiscordAPIBaseURL == "" {
+			problems = append(problems, "DISCORD_API_BASE_URL must not be empty")
+		}
+		if len(cfg.AllowedAuthorIDs) == 0 {
+			problems = append(problems, "VOICE_INBOX_ALLOWED_AUTHOR_IDS must include at least one author ID")
+		}
 	}
-	if cfg.VoiceInboxChannelID == "" {
-		problems = append(problems, "VOICE_INBOX_CHANNEL_ID is required")
-	}
-	if cfg.DiscordAPIBaseURL == "" {
-		problems = append(problems, "DISCORD_API_BASE_URL must not be empty")
-	}
-	if len(cfg.AllowedAuthorIDs) == 0 {
-		problems = append(problems, "VOICE_INBOX_ALLOWED_AUTHOR_IDS must include at least one author ID")
+	if command == "serve" {
+		if cfg.IngestAuthToken == "" {
+			problems = append(problems, "INGEST_AUTH_TOKEN is required")
+		}
+		if strings.TrimSpace(cfg.IngestListenAddr) == "" {
+			problems = append(problems, "INGEST_LISTEN_ADDR must not be empty")
+		}
 	}
 	if cfg.ObsidianBaseURL == "" {
 		problems = append(problems, "OBSIDIAN_BASE_URL is required")
@@ -127,6 +149,12 @@ func validate(cfg Config) error {
 	}
 	if cfg.VaultJournalDir == "" {
 		problems = append(problems, "VAULT_JOURNAL_DIR must not be empty")
+	}
+	if cfg.IngestMaxBodyMB <= 0 {
+		problems = append(problems, "INGEST_MAX_BODY_MB must be > 0")
+	}
+	if strings.TrimSpace(cfg.IngestSourceName) == "" {
+		problems = append(problems, "INGEST_SOURCE_NAME must not be empty")
 	}
 
 	if len(problems) > 0 {

@@ -29,6 +29,8 @@ func TestBuildEntry(t *testing.T) {
 	entry := BuildEntry(EntryInput{
 		Now:          now,
 		Transcript:   "テスト音声",
+		Source:       "discord",
+		CaptureID:    "123",
 		ChannelID:    "1476388224124325909",
 		MessageID:    "123",
 		AuthorID:     "968754117885456425",
@@ -43,6 +45,8 @@ func TestBuildEntry(t *testing.T) {
 		"### 🎤 Voice Inbox",
 		"テスト音声",
 		"voice_inbox:",
+		`source: "discord"`,
+		`capture_id: "123"`,
 		`discord_message_id: "123"`,
 		`audio_file: "2026/02/26/123_abc.orig"`,
 	}

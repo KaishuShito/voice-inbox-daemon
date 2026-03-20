@@ -10,6 +10,10 @@ import (
 type EntryInput struct {
 	Now          time.Time
 	Transcript   string
+	Source       string
+	CaptureID    string
+	DeviceID     string
+	CapturedAt   *time.Time
 	ChannelID    string
 	MessageID    string
 	AuthorID     string
@@ -47,11 +51,23 @@ func BuildEntry(in EntryInput) string {
 	if transcript == "" {
 		transcript = "(transcript is empty)"
 	}
+	source := strings.TrimSpace(in.Source)
+	if source == "" {
+		source = "discord"
+	}
+	capturedAt := ""
+	if in.CapturedAt != nil && !in.CapturedAt.IsZero() {
+		capturedAt = in.CapturedAt.UTC().Format(time.RFC3339)
+	}
 
 	return fmt.Sprintf(
-		"\n## ログ - %s\n### 🎤 Voice Inbox\n\n%s\n\n```yaml\nvoice_inbox:\n  discord_channel_id: \"%s\"\n  discord_message_id: \"%s\"\n  discord_author_id: \"%s\"\n  discord_jump_url: \"%s\"\n  audio_file: \"%s\"\n  whisper_model: \"%s\"\n  processed_at: \"%s\"\n```\n",
+		"\n## ログ - %s\n### 🎤 Voice Inbox\n\n%s\n\n```yaml\nvoice_inbox:\n  source: \"%s\"\n  capture_id: \"%s\"\n  device_id: \"%s\"\n  captured_at: \"%s\"\n  discord_channel_id: \"%s\"\n  discord_message_id: \"%s\"\n  discord_author_id: \"%s\"\n  discord_jump_url: \"%s\"\n  audio_file: \"%s\"\n  whisper_model: \"%s\"\n  processed_at: \"%s\"\n```\n",
 		headlineTime,
 		transcript,
+		source,
+		in.CaptureID,
+		in.DeviceID,
+		capturedAt,
 		in.ChannelID,
 		in.MessageID,
 		in.AuthorID,

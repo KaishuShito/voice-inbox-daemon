@@ -21,6 +21,8 @@ Discord の `#voice-input` に投げた音声メモを、5分おきに拾って 
 - `ffmpeg` で正規化 → `whisper` で転写
 - Obsidian Local REST API へ Journal 追記
 - SQLiteで重複防止 / retryキュー / 状態管理
+- 5分ごとの poll で期限到来した retry も自動再処理
+- `serve` で Android などからの HTTP 音声アップロードも受け付け
 - ✅ リアクションで処理済みマーキング
 - launchdで常駐（5分ポーリング + 日次cleanup）
 
@@ -53,7 +55,26 @@ chmod 600 .env
 ./dist/voice-inbox retry --json
 ./dist/voice-inbox cleanup --json
 ./dist/voice-inbox status --json
+./dist/voice-inbox serve
 ```
+
+## HTTP ingest (v0.0.1)
+
+Android Voice Inbox 向けの最小 ingest endpoint:
+
+- `POST /v0/captures`
+- `Authorization: Bearer $INGEST_AUTH_TOKEN`
+- `multipart/form-data`
+- fields: `audio`, `capture_id`, `device_id`, `captured_at`
+
+主な env:
+
+- `INGEST_LISTEN_ADDR` 既定 `127.0.0.1:8787`
+- `INGEST_AUTH_TOKEN` 必須
+- `INGEST_MAX_BODY_MB` 既定 `32`
+- `INGEST_SOURCE_NAME` 既定 `android-voice-inbox`
+
+`serve` は raw file の永続化と SQLite 登録の両方が成功するまで ACK を返しません。同じ `capture_id` は idempotent に扱います。
 
 ## Bot avatar
 

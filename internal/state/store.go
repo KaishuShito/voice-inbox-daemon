@@ -38,12 +38,34 @@ type MessageRecord struct {
 	UpdatedAt          time.Time
 }
 
+type CaptureRecord struct {
+	CaptureID       string
+	Source          string
+	SourceDedupeKey string
+	DeviceID        string
+	CapturedAt      *time.Time
+	ReceivedAt      time.Time
+	RawAudioPath    string
+	ContentType     string
+	Status          string
+	Attempts        int
+	NextRetryAt     *time.Time
+	JournalPath     string
+	TranscriptPath  string
+	LastError       string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
 type StatusSummary struct {
 	Total              int            `json:"total"`
 	ByStatus           map[string]int `json:"by_status"`
 	RetryDue           int            `json:"retry_due"`
 	PermanentFailCount int            `json:"permanent_failed"`
 	LastSeenMessageID  string         `json:"last_seen_message_id,omitempty"`
+	CaptureTotal       int            `json:"capture_total"`
+	CaptureByStatus    map[string]int `json:"capture_by_status,omitempty"`
+	CaptureRetryDue    int            `json:"capture_retry_due"`
 }
 
 func Open(path string) (*Store, error) {
@@ -106,6 +128,24 @@ func (s *Store) initSchema() error {
 		  value TEXT NOT NULL,
 		  updated_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS captures (
+		  capture_id TEXT PRIMARY KEY,
+		  source TEXT NOT NULL,
+		  source_dedupe_key TEXT,
+		  device_id TEXT,
+		  captured_at TEXT,
+		  received_at TEXT NOT NULL,
+		  raw_audio_path TEXT NOT NULL,
+		  content_type TEXT,
+		  status TEXT NOT NULL,
+		  attempts INTEGER NOT NULL DEFAULT 0,
+		  next_retry_at TEXT,
+		  journal_path TEXT,
+		  transcript_path TEXT,
+		  last_error TEXT,
+		  created_at TEXT NOT NULL,
+		  updated_at TEXT NOT NULL
+		);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -118,7 +158,10 @@ func (s *Store) initSchema() error {
 			return err
 		}
 	}
-	return s.SetKV("schema_version", "1")
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_captures_source_dedupe_key ON captures(source_dedupe_key)`); err != nil {
+		return err
+	}
+	return s.SetKV("schema_version", "2")
 }
 
 func (s *Store) BeginRun(command string, startedAt time.Time) (string, error) {
@@ -204,6 +247,170 @@ func (s *Store) GetMessage(messageID string) (MessageRecord, bool, error) {
 		return MessageRecord{}, false, err
 	}
 	return rec, found, nil
+}
+
+func (s *Store) CreateCapture(rec CaptureRecord) error {
+	now := time.Now().UTC()
+	createdAt := rec.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	updatedAt := rec.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = now
+	}
+	receivedAt := rec.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = now
+	}
+	status := strings.TrimSpace(rec.Status)
+	if status == "" {
+		status = "pending"
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO captures (
+			capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
+			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
+			transcript_path, last_error, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		rec.CaptureID,
+		rec.Source,
+		nullable(rec.SourceDedupeKey),
+		nullable(rec.DeviceID),
+		formatTime(rec.CapturedAt),
+		receivedAt.UTC().Format(time.RFC3339),
+		rec.RawAudioPath,
+		nullable(rec.ContentType),
+		status,
+		rec.Attempts,
+		formatTime(rec.NextRetryAt),
+		nullable(rec.JournalPath),
+		nullable(rec.TranscriptPath),
+		nullable(trimError(rec.LastError)),
+		createdAt.UTC().Format(time.RFC3339),
+		updatedAt.UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+func (s *Store) GetCapture(captureID string) (CaptureRecord, bool, error) {
+	row := s.db.QueryRow(`
+		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
+			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
+			transcript_path, last_error, created_at, updated_at
+		FROM captures WHERE capture_id = ?
+	`, captureID)
+	rec, found, err := scanCaptureRow(row)
+	if err == sql.ErrNoRows {
+		return CaptureRecord{}, false, nil
+	}
+	if err != nil {
+		return CaptureRecord{}, false, err
+	}
+	return rec, found, nil
+}
+
+func (s *Store) GetCaptureBySourceDedupeKey(sourceDedupeKey string) (CaptureRecord, bool, error) {
+	row := s.db.QueryRow(`
+		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
+			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
+			transcript_path, last_error, created_at, updated_at
+		FROM captures
+		WHERE source_dedupe_key = ?
+	`, sourceDedupeKey)
+	rec, found, err := scanCaptureRow(row)
+	if err == sql.ErrNoRows {
+		return CaptureRecord{}, false, nil
+	}
+	if err != nil {
+		return CaptureRecord{}, false, err
+	}
+	return rec, found, nil
+}
+
+func (s *Store) RecoverStuckCaptures() (int, error) {
+	res, err := s.db.Exec(`
+		UPDATE captures
+		SET status = 'pending', next_retry_at = NULL, updated_at = ?
+		WHERE status = 'processing'
+	`, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
+func (s *Store) ListCapturesForProcessing(now time.Time, limit int) ([]CaptureRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
+			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
+			transcript_path, last_error, created_at, updated_at
+		FROM captures
+		WHERE status = 'pending'
+		   OR (status = 'failed' AND next_retry_at IS NOT NULL AND next_retry_at <= ?)
+		ORDER BY created_at ASC
+		LIMIT ?
+	`, now.UTC().Format(time.RFC3339), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CaptureRecord
+	for rows.Next() {
+		rec, found, err := scanCaptureRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			out = append(out, rec)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) MarkCaptureProcessing(captureID string) error {
+	_, err := s.db.Exec(`
+		UPDATE captures
+		SET status = 'processing', next_retry_at = NULL, updated_at = ?
+		WHERE capture_id = ?
+	`, time.Now().UTC().Format(time.RFC3339), captureID)
+	return err
+}
+
+func (s *Store) MarkCaptureDone(captureID, journalPath, transcriptPath string) error {
+	_, err := s.db.Exec(`
+		UPDATE captures
+		SET status = 'done',
+			journal_path = ?,
+			transcript_path = ?,
+			last_error = NULL,
+			next_retry_at = NULL,
+			updated_at = ?
+		WHERE capture_id = ?
+	`, nullable(journalPath), nullable(transcriptPath), time.Now().UTC().Format(time.RFC3339), captureID)
+	return err
+}
+
+func (s *Store) MarkCaptureFailed(captureID, errText string, attempts int, nextRetryAt *time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE captures
+		SET status = 'failed',
+			attempts = ?,
+			last_error = ?,
+			next_retry_at = ?,
+			updated_at = ?
+		WHERE capture_id = ?
+	`, attempts, trimError(errText), formatTime(nextRetryAt), time.Now().UTC().Format(time.RFC3339), captureID)
+	return err
 }
 
 func (s *Store) MarkDone(messageID, journalPath, audioPath, transcriptPath, jumpURL string) error {
@@ -393,8 +600,85 @@ func (s *Store) ClearTranscriptPath(messageID string) error {
 	return err
 }
 
+func (s *Store) ListDoneCapturesWithAudioBefore(cutoff time.Time, limit int) ([]CaptureRecord, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.db.Query(`
+		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
+			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
+			transcript_path, last_error, created_at, updated_at
+		FROM captures
+		WHERE status = 'done'
+		  AND raw_audio_path IS NOT NULL
+		  AND raw_audio_path != ''
+		  AND updated_at < ?
+		ORDER BY updated_at ASC
+		LIMIT ?
+	`, cutoff.UTC().Format(time.RFC3339), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CaptureRecord
+	for rows.Next() {
+		rec, found, err := scanCaptureRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			out = append(out, rec)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListDoneCapturesWithTranscriptBefore(cutoff time.Time, limit int) ([]CaptureRecord, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.db.Query(`
+		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
+			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
+			transcript_path, last_error, created_at, updated_at
+		FROM captures
+		WHERE status = 'done'
+		  AND transcript_path IS NOT NULL
+		  AND updated_at < ?
+		ORDER BY updated_at ASC
+		LIMIT ?
+	`, cutoff.UTC().Format(time.RFC3339), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CaptureRecord
+	for rows.Next() {
+		rec, found, err := scanCaptureRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			out = append(out, rec)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ClearCaptureAudioPath(captureID string) error {
+	_, err := s.db.Exec(`UPDATE captures SET raw_audio_path = '', updated_at = ? WHERE capture_id = ?`, time.Now().UTC().Format(time.RFC3339), captureID)
+	return err
+}
+
+func (s *Store) ClearCaptureTranscriptPath(captureID string) error {
+	_, err := s.db.Exec(`UPDATE captures SET transcript_path = NULL, updated_at = ? WHERE capture_id = ?`, time.Now().UTC().Format(time.RFC3339), captureID)
+	return err
+}
+
 func (s *Store) Summary(now time.Time, maxRetryAttempts int) (StatusSummary, error) {
-	summary := StatusSummary{ByStatus: map[string]int{}}
+	summary := StatusSummary{ByStatus: map[string]int{}, CaptureByStatus: map[string]int{}}
 
 	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM messages GROUP BY status`)
 	if err != nil {
@@ -414,6 +698,24 @@ func (s *Store) Summary(now time.Time, maxRetryAttempts int) (StatusSummary, err
 		return summary, err
 	}
 
+	captureRows, err := s.db.Query(`SELECT status, COUNT(*) FROM captures GROUP BY status`)
+	if err != nil {
+		return summary, err
+	}
+	defer captureRows.Close()
+	for captureRows.Next() {
+		var status string
+		var count int
+		if err := captureRows.Scan(&status, &count); err != nil {
+			return summary, err
+		}
+		summary.CaptureByStatus[status] = count
+		summary.CaptureTotal += count
+	}
+	if err := captureRows.Err(); err != nil {
+		return summary, err
+	}
+
 	_ = s.db.QueryRow(`
 		SELECT COUNT(*)
 		FROM messages
@@ -430,6 +732,12 @@ func (s *Store) Summary(now time.Time, maxRetryAttempts int) (StatusSummary, err
 		FROM messages
 		WHERE status = 'failed' AND attempts >= ?
 	`, maxRetryAttempts).Scan(&summary.PermanentFailCount)
+	_ = s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM captures
+		WHERE status = 'pending'
+		   OR (status = 'failed' AND next_retry_at IS NOT NULL AND next_retry_at <= ?)
+	`, now.UTC().Format(time.RFC3339)).Scan(&summary.CaptureRetryDue)
 
 	if v, ok, err := s.GetKV("last_seen_message_id"); err == nil && ok {
 		summary.LastSeenMessageID = v
@@ -503,6 +811,81 @@ func scanMessageRows(rows *sql.Rows) (MessageRecord, bool, error) {
 		if err == nil {
 			rec.NextRetryAt = &t
 		}
+	}
+	if t, err := time.Parse(time.RFC3339, createdAtRaw); err == nil {
+		rec.CreatedAt = t
+	}
+	if t, err := time.Parse(time.RFC3339, updatedAtRaw); err == nil {
+		rec.UpdatedAt = t
+	}
+	return rec, true, nil
+}
+
+func scanCaptureRows(rows *sql.Rows) (CaptureRecord, bool, error) {
+	var rec CaptureRecord
+	var sourceDedupe sql.NullString
+	var deviceID sql.NullString
+	var capturedAt sql.NullString
+	var nextRetry sql.NullString
+	var journalPath sql.NullString
+	var transcriptPath sql.NullString
+	var lastError sql.NullString
+	var contentType sql.NullString
+	var receivedAtRaw string
+	var createdAtRaw string
+	var updatedAtRaw string
+
+	err := rows.Scan(
+		&rec.CaptureID,
+		&rec.Source,
+		&sourceDedupe,
+		&deviceID,
+		&capturedAt,
+		&receivedAtRaw,
+		&rec.RawAudioPath,
+		&contentType,
+		&rec.Status,
+		&rec.Attempts,
+		&nextRetry,
+		&journalPath,
+		&transcriptPath,
+		&lastError,
+		&createdAtRaw,
+		&updatedAtRaw,
+	)
+	if err != nil {
+		return CaptureRecord{}, false, err
+	}
+	if sourceDedupe.Valid {
+		rec.SourceDedupeKey = sourceDedupe.String
+	}
+	if deviceID.Valid {
+		rec.DeviceID = deviceID.String
+	}
+	if contentType.Valid {
+		rec.ContentType = contentType.String
+	}
+	if journalPath.Valid {
+		rec.JournalPath = journalPath.String
+	}
+	if transcriptPath.Valid {
+		rec.TranscriptPath = transcriptPath.String
+	}
+	if lastError.Valid {
+		rec.LastError = lastError.String
+	}
+	if capturedAt.Valid {
+		if t, err := time.Parse(time.RFC3339, capturedAt.String); err == nil {
+			rec.CapturedAt = &t
+		}
+	}
+	if nextRetry.Valid {
+		if t, err := time.Parse(time.RFC3339, nextRetry.String); err == nil {
+			rec.NextRetryAt = &t
+		}
+	}
+	if t, err := time.Parse(time.RFC3339, receivedAtRaw); err == nil {
+		rec.ReceivedAt = t
 	}
 	if t, err := time.Parse(time.RFC3339, createdAtRaw); err == nil {
 		rec.CreatedAt = t
@@ -593,6 +976,81 @@ func scanMessageRow(row rowScanner) (MessageRecord, bool, error) {
 	return rec, true, nil
 }
 
+func scanCaptureRow(row rowScanner) (CaptureRecord, bool, error) {
+	var rec CaptureRecord
+	var sourceDedupe sql.NullString
+	var deviceID sql.NullString
+	var capturedAt sql.NullString
+	var nextRetry sql.NullString
+	var journalPath sql.NullString
+	var transcriptPath sql.NullString
+	var lastError sql.NullString
+	var contentType sql.NullString
+	var receivedAtRaw string
+	var createdAtRaw string
+	var updatedAtRaw string
+
+	err := row.Scan(
+		&rec.CaptureID,
+		&rec.Source,
+		&sourceDedupe,
+		&deviceID,
+		&capturedAt,
+		&receivedAtRaw,
+		&rec.RawAudioPath,
+		&contentType,
+		&rec.Status,
+		&rec.Attempts,
+		&nextRetry,
+		&journalPath,
+		&transcriptPath,
+		&lastError,
+		&createdAtRaw,
+		&updatedAtRaw,
+	)
+	if err != nil {
+		return CaptureRecord{}, false, err
+	}
+	if sourceDedupe.Valid {
+		rec.SourceDedupeKey = sourceDedupe.String
+	}
+	if deviceID.Valid {
+		rec.DeviceID = deviceID.String
+	}
+	if contentType.Valid {
+		rec.ContentType = contentType.String
+	}
+	if journalPath.Valid {
+		rec.JournalPath = journalPath.String
+	}
+	if transcriptPath.Valid {
+		rec.TranscriptPath = transcriptPath.String
+	}
+	if lastError.Valid {
+		rec.LastError = lastError.String
+	}
+	if capturedAt.Valid {
+		if t, err := time.Parse(time.RFC3339, capturedAt.String); err == nil {
+			rec.CapturedAt = &t
+		}
+	}
+	if nextRetry.Valid {
+		if t, err := time.Parse(time.RFC3339, nextRetry.String); err == nil {
+			rec.NextRetryAt = &t
+		}
+	}
+	if t, err := time.Parse(time.RFC3339, receivedAtRaw); err == nil {
+		rec.ReceivedAt = t
+	}
+	if t, err := time.Parse(time.RFC3339, createdAtRaw); err == nil {
+		rec.CreatedAt = t
+	}
+	if t, err := time.Parse(time.RFC3339, updatedAtRaw); err == nil {
+		rec.UpdatedAt = t
+	}
+	return rec, true, nil
+}
+
 func randomID() (string, error) {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -606,6 +1064,13 @@ func nullable(v string) any {
 		return nil
 	}
 	return v
+}
+
+func formatTime(v *time.Time) any {
+	if v == nil || v.IsZero() {
+		return nil
+	}
+	return v.UTC().Format(time.RFC3339)
 }
 
 func trimError(errText string) string {
