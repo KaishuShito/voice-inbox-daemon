@@ -691,10 +691,6 @@ func (r *Runner) processStoredCapture(ctx context.Context, rec state.CaptureReco
 
 func (r *Runner) processTarget(ctx context.Context, target processTarget) (processArtifacts, error) {
 	now := time.Now()
-	jumpURL := target.JumpURL
-	if jumpURL == "" && target.GuildID != "" && target.ChannelID != "" && target.MessageID != "" {
-		jumpURL = journal.DiscordJumpURL(target.GuildID, target.ChannelID, target.MessageID)
-	}
 
 	kind := target.Kind
 	if kind == "" {
@@ -713,21 +709,11 @@ func (r *Runner) processTarget(ctx context.Context, target processTarget) (proce
 	var transcriptText string
 	transcriptPath := ""
 	audioPath := target.RawAudioPath
-	journalAudioFile := ""
-	whisperModel := r.cfg.WhisperModel
 
 	if preTranscribed := strings.TrimSpace(target.PreTranscribedText); preTranscribed != "" {
 		transcriptText = preTranscribed
-		whisperModel = "gpt-4o-mini-transcribe"
-		if strings.TrimSpace(audioPath) != "" {
-			journalAudioFile = relativeOrSelf(audioPath, r.cfg.AudioStoreDir)
-		} else {
-			journalAudioFile = "(text-only)"
-		}
 	} else if kind == CandidateKindText {
 		transcriptText = strings.TrimSpace(target.TextContent)
-		whisperModel = "direct-text"
-		journalAudioFile = "(text-only)"
 	} else {
 		origPath := target.RawAudioPath
 		if strings.TrimSpace(origPath) == "" {
@@ -766,7 +752,6 @@ func (r *Runner) processTarget(ctx context.Context, target processTarget) (proce
 		}
 		transcriptText = txRes.Text
 		transcriptPath = txRes.TranscriptJSON
-		journalAudioFile = relativeOrSelf(origPath, r.cfg.AudioStoreDir)
 	}
 
 	journalPath := journal.FilePath(r.cfg.VaultJournalDir, now)
@@ -781,19 +766,11 @@ func (r *Runner) processTarget(ctx context.Context, target processTarget) (proce
 	}
 
 	entry := journal.BuildEntry(journal.EntryInput{
-		Now:          now,
-		Transcript:   transcriptText,
-		Source:       target.Source,
-		CaptureID:    target.CaptureID,
-		DeviceID:     target.DeviceID,
-		CapturedAt:   target.CapturedAt,
-		ChannelID:    target.ChannelID,
-		MessageID:    target.MessageID,
-		AuthorID:     target.AuthorID,
-		JumpURL:      jumpURL,
-		AudioFile:    journalAudioFile,
-		WhisperModel: whisperModel,
-		ProcessedAt:  time.Now(),
+		Now:        now,
+		Transcript: transcriptText,
+		Source:     target.Source,
+		CaptureID:  target.CaptureID,
+		DeviceID:   target.DeviceID,
 	})
 
 	alreadyLogged, err := r.journalContainsCapture(ctx, journalPath, target.Source, target.CaptureID)

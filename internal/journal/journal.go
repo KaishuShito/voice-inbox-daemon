@@ -8,19 +8,11 @@ import (
 )
 
 type EntryInput struct {
-	Now          time.Time
-	Transcript   string
-	Source       string
-	CaptureID    string
-	DeviceID     string
-	CapturedAt   *time.Time
-	ChannelID    string
-	MessageID    string
-	AuthorID     string
-	JumpURL      string
-	AudioFile    string
-	WhisperModel string
-	ProcessedAt  time.Time
+	Now        time.Time
+	Transcript string
+	Source     string
+	CaptureID  string
+	DeviceID   string
 }
 
 func FilePath(journalDir string, t time.Time) string {
@@ -45,7 +37,6 @@ source: voice-inbox-daemon
 
 func BuildEntry(in EntryInput) string {
 	headlineTime := in.Now.Format("15:04")
-	processedAt := in.ProcessedAt.Format(time.RFC3339)
 
 	transcript := strings.TrimSpace(in.Transcript)
 	if transcript == "" {
@@ -56,27 +47,23 @@ func BuildEntry(in EntryInput) string {
 		source = "discord"
 	}
 	captureKey := CaptureKey(source, in.CaptureID)
-	capturedAt := ""
-	if in.CapturedAt != nil && !in.CapturedAt.IsZero() {
-		capturedAt = in.CapturedAt.UTC().Format(time.RFC3339)
+	label := strings.TrimSpace(in.DeviceID)
+	if label == "" {
+		switch source {
+		case "discord":
+			label = "Discord"
+		default:
+			label = source
+		}
 	}
 
 	return fmt.Sprintf(
-		"\n## ログ - %s\n### 🎤 Voice Inbox\n\n%s\n\n```yaml\nvoice_inbox:\n  source: \"%s\"\n  capture_id: \"%s\"\n  capture_key: \"%s\"\n  device_id: \"%s\"\n  captured_at: \"%s\"\n  discord_channel_id: \"%s\"\n  discord_message_id: \"%s\"\n  discord_author_id: \"%s\"\n  discord_jump_url: \"%s\"\n  audio_file: \"%s\"\n  whisper_model: \"%s\"\n  processed_at: \"%s\"\n```\n",
+		"\n## ログ - %s\n### 🎤 Voice Inbox\n\n%s\n\n_%s via %s_\n<!-- vi:%s -->\n",
 		headlineTime,
 		transcript,
-		source,
-		in.CaptureID,
+		headlineTime,
+		label,
 		captureKey,
-		in.DeviceID,
-		capturedAt,
-		in.ChannelID,
-		in.MessageID,
-		in.AuthorID,
-		in.JumpURL,
-		in.AudioFile,
-		in.WhisperModel,
-		processedAt,
 	)
 }
 

@@ -24,36 +24,62 @@ func TestNewJournalContent(t *testing.T) {
 	}
 }
 
-func TestBuildEntry(t *testing.T) {
+func TestBuildEntryUsesDeviceIDLabel(t *testing.T) {
 	now := time.Date(2026, 2, 26, 15, 42, 1, 0, time.UTC)
 	entry := BuildEntry(EntryInput{
-		Now:          now,
-		Transcript:   "テスト音声",
-		Source:       "discord",
-		CaptureID:    "123",
-		ChannelID:    "1476388224124325909",
-		MessageID:    "123",
-		AuthorID:     "968754117885456425",
-		JumpURL:      "https://discord.com/channels/g/c/m",
-		AudioFile:    "2026/02/26/123_abc.orig",
-		WhisperModel: "large-v3-turbo",
-		ProcessedAt:  now,
+		Now:        now,
+		Transcript: "テスト音声",
+		Source:     "android-voice-inbox",
+		CaptureID:  "123",
+		DeviceID:   "Pixel 8a",
 	})
 
 	checks := []string{
 		"## ログ - 15:42",
 		"### 🎤 Voice Inbox",
 		"テスト音声",
-		"voice_inbox:",
-		`source: "discord"`,
-		`capture_id: "123"`,
-		`capture_key: "discord:123"`,
-		`discord_message_id: "123"`,
-		`audio_file: "2026/02/26/123_abc.orig"`,
+		"_15:42 via Pixel 8a_",
+		"<!-- vi:android-voice-inbox:123 -->",
 	}
 	for _, c := range checks {
 		if !strings.Contains(entry, c) {
 			t.Fatalf("expected entry to include %q", c)
 		}
+	}
+	for _, c := range []string{"```yaml", "voice_inbox:", "capture_key:"} {
+		if strings.Contains(entry, c) {
+			t.Fatalf("expected entry to omit %q", c)
+		}
+	}
+}
+
+func TestBuildEntryUsesDiscordLabelWhenDeviceIDMissing(t *testing.T) {
+	now := time.Date(2026, 2, 26, 15, 42, 1, 0, time.UTC)
+	entry := BuildEntry(EntryInput{
+		Now:        now,
+		Transcript: "テスト音声",
+		Source:     "discord",
+		CaptureID:  "123",
+	})
+
+	if !strings.Contains(entry, "_15:42 via Discord_") {
+		t.Fatalf("expected Discord label, got %q", entry)
+	}
+	if !strings.Contains(entry, "<!-- vi:discord:123 -->") {
+		t.Fatalf("expected HTML marker, got %q", entry)
+	}
+}
+
+func TestBuildEntryUsesSourceLabelWhenDeviceIDMissing(t *testing.T) {
+	now := time.Date(2026, 2, 26, 15, 42, 1, 0, time.UTC)
+	entry := BuildEntry(EntryInput{
+		Now:        now,
+		Transcript: "テスト音声",
+		Source:     "android-voice-inbox",
+		CaptureID:  "123",
+	})
+
+	if !strings.Contains(entry, "_15:42 via android-voice-inbox_") {
+		t.Fatalf("expected source label, got %q", entry)
 	}
 }

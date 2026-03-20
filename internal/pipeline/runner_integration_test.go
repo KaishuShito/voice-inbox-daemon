@@ -503,8 +503,8 @@ func TestPollOnceTextMessage(t *testing.T) {
 	if !strings.Contains(om.files[journalPath], "これはテキスト入力です") {
 		t.Fatalf("journal should include text message content")
 	}
-	if !strings.Contains(om.files[journalPath], `whisper_model: "direct-text"`) {
-		t.Fatalf("journal should include direct-text marker")
+	if !strings.Contains(om.files[journalPath], "<!-- vi:discord:4001 -->") {
+		t.Fatalf("journal should include HTML comment marker")
 	}
 }
 
@@ -561,11 +561,11 @@ func TestProcessCapturesOnceAppendsJournalAndMarksDone(t *testing.T) {
 
 	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
 	content := om.files[journalPath]
-	if !strings.Contains(content, `capture_id: "cap-1001"`) {
-		t.Fatalf("journal should include capture id metadata")
+	if !strings.Contains(content, "<!-- vi:android-voice-inbox:cap-1001 -->") {
+		t.Fatalf("journal should include HTML capture marker")
 	}
-	if !strings.Contains(content, `source: "android-voice-inbox"`) {
-		t.Fatalf("journal should include capture source metadata")
+	if !strings.Contains(content, "via pixel-8a") {
+		t.Fatalf("journal should include device label")
 	}
 }
 
@@ -617,7 +617,7 @@ func TestProcessCapturesOnceProcessesPendingCapture(t *testing.T) {
 
 	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
 	content := om.files[journalPath]
-	if !strings.Contains(content, `capture_id: "capture-5001"`) {
+	if !strings.Contains(content, "<!-- vi:android-voice-inbox:capture-5001 -->") {
 		t.Fatalf("journal should include capture marker")
 	}
 	if !strings.Contains(content, "テスト文字起こし") {
@@ -686,8 +686,8 @@ func TestProcessCapturesOnceUsesPreTranscribedTextAndSkipsWhisper(t *testing.T) 
 	if !strings.Contains(content, "Android already transcribed this") {
 		t.Fatalf("journal should include pre-transcribed text")
 	}
-	if !strings.Contains(content, `whisper_model: "gpt-4o-mini-transcribe"`) {
-		t.Fatalf("journal should record gpt-4o-mini-transcribe metadata")
+	if !strings.Contains(content, "<!-- vi:android-voice-inbox:capture-pretranscribed -->") {
+		t.Fatalf("journal should include HTML marker")
 	}
 }
 
@@ -740,8 +740,8 @@ func TestProcessCapturesOnceTreatsStoredRawFileAsAudioDespiteTextMime(t *testing
 	if !strings.Contains(content, "テスト文字起こし") {
 		t.Fatalf("journal should include transcript")
 	}
-	if !strings.Contains(content, `audio_file: "ingest/2026/03/19/capture-plain-text.bin"`) {
-		t.Fatalf("journal should include stored raw audio path, got %s", content)
+	if !strings.Contains(content, "<!-- vi:android-voice-inbox:capture-plain-text -->") {
+		t.Fatalf("journal should include HTML marker, got %s", content)
 	}
 }
 
@@ -798,8 +798,8 @@ func TestProcessCapturesOnceBlankTranscriptFallsBackToWhisper(t *testing.T) {
 	if !strings.Contains(content, "テスト文字起こし") {
 		t.Fatalf("journal should include whisper transcript")
 	}
-	if !strings.Contains(content, `whisper_model: "large-v3-turbo"`) {
-		t.Fatalf("journal should include whisper model for fallback path")
+	if !strings.Contains(content, "<!-- vi:android-voice-inbox:capture-blank-transcript -->") {
+		t.Fatalf("journal should include HTML marker for fallback path")
 	}
 }
 
@@ -838,7 +838,7 @@ func TestProcessTargetDefaultsUnknownMimeRawFileToAudio(t *testing.T) {
 	if !strings.Contains(content, "テスト文字起こし") {
 		t.Fatalf("journal should include transcript")
 	}
-	if !strings.Contains(content, `capture_id: "capture-octet-stream"`) {
+	if !strings.Contains(content, "<!-- vi:android-voice-inbox:capture-octet-stream -->") {
 		t.Fatalf("journal should include capture marker")
 	}
 
@@ -890,14 +890,17 @@ func TestProcessTargetJournalDedupeIncludesSource(t *testing.T) {
 
 	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
 	content := om.files[journalPath]
-	if strings.Count(content, `capture_id: "shared-id"`) != 2 {
+	if strings.Count(content, "<!-- vi:") != 2 {
 		t.Fatalf("expected both entries to be appended, got %s", content)
 	}
-	if !strings.Contains(content, `capture_key: "discord:shared-id"`) {
+	if !strings.Contains(content, "<!-- vi:discord:shared-id -->") {
 		t.Fatalf("journal should include discord capture key")
 	}
-	if !strings.Contains(content, `capture_key: "android-voice-inbox:shared-id"`) {
+	if !strings.Contains(content, "<!-- vi:android-voice-inbox:shared-id -->") {
 		t.Fatalf("journal should include android capture key")
+	}
+	if strings.Contains(content, "```yaml") {
+		t.Fatalf("journal should not include YAML metadata block")
 	}
 }
 
@@ -1082,7 +1085,7 @@ func TestProcessCapturesOnceSuccessAndNoDuplicateJournalAppend(t *testing.T) {
 	}
 
 	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
-	if !strings.Contains(om.files[journalPath], `capture_id: "cap-2001"`) {
+	if !strings.Contains(om.files[journalPath], "<!-- vi:android-voice-inbox:cap-2001 -->") {
 		t.Fatalf("journal should include capture marker")
 	}
 	appendHits := om.appendHits
