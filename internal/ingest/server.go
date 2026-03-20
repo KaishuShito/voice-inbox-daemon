@@ -68,6 +68,11 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid multipart body: %v", err), http.StatusBadRequest)
 		return
 	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
 
 	captureID := strings.TrimSpace(r.FormValue("capture_id"))
 	if captureID == "" {
