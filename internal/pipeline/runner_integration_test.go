@@ -625,6 +625,60 @@ func TestProcessCapturesOnceProcessesPendingCapture(t *testing.T) {
 	}
 }
 
+func TestProcessCapturesOnceTreatsStoredRawFileAsAudioDespiteTextMime(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawPath := filepath.Join(cfg.AudioStoreDir, "ingest", "2026", "03", "19", "capture-plain-text.bin")
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:    "capture-plain-text",
+		Source:       "android-voice-inbox",
+		DeviceID:     "pixel-8a",
+		ReceivedAt:   time.Now().UTC(),
+		RawAudioPath: rawPath,
+		ContentType:  "text/plain",
+		Status:       "pending",
+	}); err != nil {
+		t.Fatalf("create capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures once failed: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	rec, found, err := st.GetCapture("capture-plain-text")
+	if err != nil || !found {
+		t.Fatalf("expected stored capture: found=%v err=%v", found, err)
+	}
+	if rec.Status != "done" {
+		t.Fatalf("expected done status, got %s", rec.Status)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	content := om.files[journalPath]
+	if !strings.Contains(content, "テスト文字起こし") {
+		t.Fatalf("journal should include transcript")
+	}
+	if !strings.Contains(content, `audio_file: "ingest/2026/03/19/capture-plain-text.bin"`) {
+		t.Fatalf("journal should include stored raw audio path, got %s", content)
+	}
+}
+
 func TestProcessCapturesOnceRecoversProcessingCapture(t *testing.T) {
 	dm := newDiscordMock(t)
 	defer dm.close()

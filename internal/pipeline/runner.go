@@ -663,12 +663,17 @@ func (r *Runner) processCandidate(ctx context.Context, c Candidate, previousAtte
 }
 
 func (r *Runner) processStoredCapture(ctx context.Context, rec state.CaptureRecord) (bool, bool, error) {
+	kind := kindFromContentType(rec.ContentType)
+	if strings.TrimSpace(rec.RawAudioPath) != "" {
+		kind = CandidateKindAudio
+	}
+
 	artifacts, err := r.processTarget(ctx, processTarget{
 		Source:       rec.Source,
 		CaptureID:    rec.CaptureID,
 		DeviceID:     rec.DeviceID,
 		CapturedAt:   rec.CapturedAt,
-		Kind:         kindFromContentType(rec.ContentType),
+		Kind:         kind,
 		ContentType:  rec.ContentType,
 		RawAudioPath: rec.RawAudioPath,
 	})
