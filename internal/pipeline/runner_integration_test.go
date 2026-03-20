@@ -17,6 +17,7 @@ import (
 
 	"voice-inbox-daemon/internal/config"
 	"voice-inbox-daemon/internal/discord"
+	"voice-inbox-daemon/internal/journal"
 	"voice-inbox-daemon/internal/obsidian"
 	"voice-inbox-daemon/internal/state"
 )
@@ -1169,5 +1170,103 @@ func TestProcessCapturesOnceRetriesFailedCapture(t *testing.T) {
 	}
 	if rec.Status != "done" {
 		t.Fatalf("expected done after retry, got %s", rec.Status)
+	}
+}
+
+func TestProcessCapturesOnceDedupsWithNewHTMLMarker(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawDir := filepath.Join(cfg.AudioStoreDir, "http", "2026", "03", "19")
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	rawPath := filepath.Join(rawDir, "cap-html.ogg")
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	om.files[journalPath] = journal.NewJournalContent(time.Now()) + "\n## ログ - 12:00\n### 🎤 Voice Inbox\n\n既存エントリ\n\n_12:00 via Pixel 8a_\n<!-- vi:android-voice-inbox:cap-html -->\n"
+
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:       "cap-html",
+		Source:          "android-voice-inbox",
+		SourceDedupeKey: "cap-html",
+		DeviceID:        "Pixel 8a",
+		ReceivedAt:      time.Now().UTC(),
+		RawAudioPath:    rawPath,
+		ContentType:     "audio/ogg",
+		Status:          "pending",
+	}); err != nil {
+		t.Fatalf("create capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures failed: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if om.appendHits != 0 {
+		t.Fatalf("expected dedup to skip append, appendHits=%d", om.appendHits)
+	}
+	if strings.Count(om.files[journalPath], "<!-- vi:android-voice-inbox:cap-html -->") != 1 {
+		t.Fatalf("expected exactly one HTML marker, got %q", om.files[journalPath])
+	}
+}
+
+func TestProcessCapturesOnceDedupsWithOldYAMLMarker(t *testing.T) {
+	dm := newDiscordMock(t)
+	defer dm.close()
+	om := newObsidianMock(t)
+	defer om.close()
+
+	runner, st, cfg, cleanup := setupRunner(t, dm, om)
+	defer cleanup()
+
+	rawDir := filepath.Join(cfg.AudioStoreDir, "http", "2026", "03", "19")
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		t.Fatalf("mkdir raw dir: %v", err)
+	}
+	rawPath := filepath.Join(rawDir, "cap-yaml.ogg")
+	if err := os.WriteFile(rawPath, []byte("FAKE_AUDIO"), 0o644); err != nil {
+		t.Fatalf("write raw audio: %v", err)
+	}
+
+	journalPath := "01_Projects/Journal/" + time.Now().Format("2006-01-02") + ".md"
+	om.files[journalPath] = journal.NewJournalContent(time.Now()) + "\n## ログ - 12:00\n### 🎤 Voice Inbox\n\n既存エントリ\n\n```yaml\nvoice_inbox:\n  capture_key: \"android-voice-inbox:cap-yaml\"\n```\n"
+
+	if err := st.CreateCapture(state.CaptureRecord{
+		CaptureID:       "cap-yaml",
+		Source:          "android-voice-inbox",
+		SourceDedupeKey: "cap-yaml",
+		DeviceID:        "Pixel 8a",
+		ReceivedAt:      time.Now().UTC(),
+		RawAudioPath:    rawPath,
+		ContentType:     "audio/ogg",
+		Status:          "pending",
+	}); err != nil {
+		t.Fatalf("create capture: %v", err)
+	}
+
+	res, err := runner.ProcessCapturesOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process captures failed: %v", err)
+	}
+	if res.Succeeded != 1 || res.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if om.appendHits != 0 {
+		t.Fatalf("expected dedup to skip append, appendHits=%d", om.appendHits)
+	}
+	if strings.Count(om.files[journalPath], `capture_key: "android-voice-inbox:cap-yaml"`) != 1 {
+		t.Fatalf("expected exactly one YAML marker, got %q", om.files[journalPath])
 	}
 }

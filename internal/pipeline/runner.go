@@ -795,8 +795,10 @@ func (r *Runner) journalContainsCapture(ctx context.Context, journalPath, source
 	if err != nil {
 		return false, err
 	}
-	marker := fmt.Sprintf("capture_key: \"%s\"", journal.CaptureKey(source, captureID))
-	return strings.Contains(content, marker), nil
+	captureKey := journal.CaptureKey(source, captureID)
+	oldMarker := fmt.Sprintf("capture_key: \"%s\"", captureKey)
+	newMarker := fmt.Sprintf("<!-- vi:%s -->", captureKey)
+	return strings.Contains(content, oldMarker) || strings.Contains(content, newMarker), nil
 }
 
 func (r *Runner) scheduleFailure(messageID string, previousAttempts int, processErr error) bool {
