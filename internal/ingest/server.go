@@ -28,6 +28,12 @@ type captureResponse struct {
 	Received  string `json:"received_at"`
 }
 
+type persistedUpload struct {
+	TempPath    string
+	FinalPath   string
+	ContentType string
+}
+
 func NewServer(cfg config.Config, store *state.Store) *Server {
 	return &Server{cfg: cfg, store: store}
 }
@@ -105,11 +111,17 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	receivedAt := time.Now().UTC()
-	rawPath, contentType, err := s.persistUpload(file, header.Filename, header.Header.Get("Content-Type"), captureID, receivedAt)
+	upload, err := s.persistUpload(file, header.Filename, header.Header.Get("Content-Type"), captureID, receivedAt)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("persist upload: %v", err), http.StatusInternalServerError)
 		return
 	}
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			_ = os.Remove(upload.TempPath)
+		}
+	}()
 
 	rec := state.CaptureRecord{
 		CaptureID:       captureID,
@@ -118,8 +130,8 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		DeviceID:        deviceID,
 		CapturedAt:      capturedAt,
 		ReceivedAt:      receivedAt,
-		RawAudioPath:    rawPath,
-		ContentType:     contentType,
+		RawAudioPath:    upload.FinalPath,
+		ContentType:     upload.ContentType,
 		Status:          "pending",
 	}
 	if err := s.store.CreateCapture(rec); err != nil {
@@ -136,6 +148,11 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("create capture: %v", err), http.StatusInternalServerError)
 		return
 	}
+	if err := os.Rename(upload.TempPath, upload.FinalPath); err != nil {
+		http.Error(w, fmt.Sprintf("finalize upload: %v", err), http.StatusInternalServerError)
+		return
+	}
+	cleanupTemp = false
 
 	writeJSON(w, http.StatusCreated, captureResponse{
 		CaptureID: captureID,
@@ -176,10 +193,10 @@ func (s *Server) findDuplicate(captureID, dedupeKey string) (state.CaptureRecord
 	return state.CaptureRecord{}, false, nil
 }
 
-func (s *Server) persistUpload(src io.Reader, filename, headerContentType, captureID string, receivedAt time.Time) (string, string, error) {
+func (s *Server) persistUpload(src io.Reader, filename, headerContentType, captureID string, receivedAt time.Time) (persistedUpload, error) {
 	subdir := filepath.Join(s.cfg.AudioStoreDir, "ingest", receivedAt.Format("2006/01/02"))
 	if err := os.MkdirAll(subdir, 0o755); err != nil {
-		return "", "", err
+		return persistedUpload{}, err
 	}
 
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(filename)))
@@ -199,27 +216,21 @@ func (s *Server) persistUpload(src io.Reader, filename, headerContentType, captu
 	finalPath := filepath.Join(subdir, captureID+ext)
 	tmp, err := os.CreateTemp(subdir, captureID+".*.tmp")
 	if err != nil {
-		return "", "", err
+		return persistedUpload{}, err
 	}
 	tmpPath := tmp.Name()
 	defer func() {
 		_ = tmp.Close()
-		if _, statErr := os.Stat(tmpPath); statErr == nil {
-			_ = os.Remove(tmpPath)
-		}
 	}()
 
 	if _, err := io.Copy(tmp, src); err != nil {
-		return "", "", err
+		return persistedUpload{}, err
 	}
 	if err := tmp.Sync(); err != nil {
-		return "", "", err
+		return persistedUpload{}, err
 	}
 	if err := tmp.Close(); err != nil {
-		return "", "", err
-	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return "", "", err
+		return persistedUpload{}, err
 	}
 	if contentType == "" {
 		contentType = mime.TypeByExtension(ext)
@@ -227,7 +238,11 @@ func (s *Server) persistUpload(src io.Reader, filename, headerContentType, captu
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	return finalPath, contentType, nil
+	return persistedUpload{
+		TempPath:    tmpPath,
+		FinalPath:   finalPath,
+		ContentType: contentType,
+	}, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
