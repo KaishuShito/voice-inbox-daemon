@@ -47,6 +47,7 @@ type CaptureRecord struct {
 	ReceivedAt      time.Time
 	RawAudioPath    string
 	ContentType     string
+	TranscriptText  string
 	Status          string
 	Attempts        int
 	NextRetryAt     *time.Time
@@ -137,6 +138,7 @@ func (s *Store) initSchema() error {
 		  received_at TEXT NOT NULL,
 		  raw_audio_path TEXT NOT NULL,
 		  content_type TEXT,
+		  transcript_text TEXT,
 		  status TEXT NOT NULL,
 		  attempts INTEGER NOT NULL DEFAULT 0,
 		  next_retry_at TEXT,
@@ -158,10 +160,37 @@ func (s *Store) initSchema() error {
 			return err
 		}
 	}
+	version, ok, err := s.GetKV("schema_version")
+	if err != nil {
+		return err
+	}
+	switch strings.TrimSpace(version) {
+	case "3":
+	case "2":
+		if _, err := s.db.Exec(`ALTER TABLE captures ADD COLUMN transcript_text TEXT`); err != nil {
+			lower := strings.ToLower(err.Error())
+			if !strings.Contains(lower, "duplicate column name") {
+				return err
+			}
+		}
+		if err := s.SetKV("schema_version", "3"); err != nil {
+			return err
+		}
+	default:
+		if !ok {
+			if err := s.SetKV("schema_version", "3"); err != nil {
+				return err
+			}
+			break
+		}
+		if err := s.SetKV("schema_version", "3"); err != nil {
+			return err
+		}
+	}
 	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_captures_source_dedupe_key ON captures(source_dedupe_key)`); err != nil {
 		return err
 	}
-	return s.SetKV("schema_version", "2")
+	return nil
 }
 
 func (s *Store) BeginRun(command string, startedAt time.Time) (string, error) {
@@ -270,9 +299,9 @@ func (s *Store) CreateCapture(rec CaptureRecord) error {
 	_, err := s.db.Exec(`
 		INSERT INTO captures (
 			capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
-			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
-			transcript_path, last_error, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			raw_audio_path, content_type, transcript_text, status, attempts, next_retry_at,
+			journal_path, transcript_path, last_error, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		rec.CaptureID,
 		rec.Source,
@@ -282,6 +311,7 @@ func (s *Store) CreateCapture(rec CaptureRecord) error {
 		receivedAt.UTC().Format(time.RFC3339),
 		rec.RawAudioPath,
 		nullable(rec.ContentType),
+		nullable(rec.TranscriptText),
 		status,
 		rec.Attempts,
 		formatTime(rec.NextRetryAt),
@@ -297,8 +327,8 @@ func (s *Store) CreateCapture(rec CaptureRecord) error {
 func (s *Store) GetCapture(captureID string) (CaptureRecord, bool, error) {
 	row := s.db.QueryRow(`
 		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
-			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
-			transcript_path, last_error, created_at, updated_at
+			raw_audio_path, content_type, transcript_text, status, attempts, next_retry_at,
+			journal_path, transcript_path, last_error, created_at, updated_at
 		FROM captures WHERE capture_id = ?
 	`, captureID)
 	rec, found, err := scanCaptureRow(row)
@@ -314,8 +344,8 @@ func (s *Store) GetCapture(captureID string) (CaptureRecord, bool, error) {
 func (s *Store) GetCaptureBySourceDedupeKey(sourceDedupeKey string) (CaptureRecord, bool, error) {
 	row := s.db.QueryRow(`
 		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
-			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
-			transcript_path, last_error, created_at, updated_at
+			raw_audio_path, content_type, transcript_text, status, attempts, next_retry_at,
+			journal_path, transcript_path, last_error, created_at, updated_at
 		FROM captures
 		WHERE source_dedupe_key = ?
 	`, sourceDedupeKey)
@@ -403,8 +433,8 @@ func (s *Store) ListCapturesForProcessing(now time.Time, limit int) ([]CaptureRe
 	}
 	rows, err := s.db.Query(`
 		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
-			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
-			transcript_path, last_error, created_at, updated_at
+			raw_audio_path, content_type, transcript_text, status, attempts, next_retry_at,
+			journal_path, transcript_path, last_error, created_at, updated_at
 		FROM captures
 		WHERE status = 'pending'
 		   OR (status = 'failed' AND next_retry_at IS NOT NULL AND next_retry_at <= ?)
@@ -683,8 +713,8 @@ func (s *Store) ListDoneCapturesWithAudioBefore(cutoff time.Time, limit int) ([]
 	}
 	rows, err := s.db.Query(`
 		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
-			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
-			transcript_path, last_error, created_at, updated_at
+			raw_audio_path, content_type, transcript_text, status, attempts, next_retry_at,
+			journal_path, transcript_path, last_error, created_at, updated_at
 		FROM captures
 		WHERE status = 'done'
 		  AND raw_audio_path IS NOT NULL
@@ -717,8 +747,8 @@ func (s *Store) ListDoneCapturesWithTranscriptBefore(cutoff time.Time, limit int
 	}
 	rows, err := s.db.Query(`
 		SELECT capture_id, source, source_dedupe_key, device_id, captured_at, received_at,
-			raw_audio_path, content_type, status, attempts, next_retry_at, journal_path,
-			transcript_path, last_error, created_at, updated_at
+			raw_audio_path, content_type, transcript_text, status, attempts, next_retry_at,
+			journal_path, transcript_path, last_error, created_at, updated_at
 		FROM captures
 		WHERE status = 'done'
 		  AND transcript_path IS NOT NULL
@@ -906,6 +936,7 @@ func scanCaptureRows(rows *sql.Rows) (CaptureRecord, bool, error) {
 	var nextRetry sql.NullString
 	var journalPath sql.NullString
 	var transcriptPath sql.NullString
+	var transcriptText sql.NullString
 	var lastError sql.NullString
 	var contentType sql.NullString
 	var receivedAtRaw string
@@ -921,6 +952,7 @@ func scanCaptureRows(rows *sql.Rows) (CaptureRecord, bool, error) {
 		&receivedAtRaw,
 		&rec.RawAudioPath,
 		&contentType,
+		&transcriptText,
 		&rec.Status,
 		&rec.Attempts,
 		&nextRetry,
@@ -941,6 +973,9 @@ func scanCaptureRows(rows *sql.Rows) (CaptureRecord, bool, error) {
 	}
 	if contentType.Valid {
 		rec.ContentType = contentType.String
+	}
+	if transcriptText.Valid {
+		rec.TranscriptText = transcriptText.String
 	}
 	if journalPath.Valid {
 		rec.JournalPath = journalPath.String
@@ -1061,6 +1096,7 @@ func scanCaptureRow(row rowScanner) (CaptureRecord, bool, error) {
 	var nextRetry sql.NullString
 	var journalPath sql.NullString
 	var transcriptPath sql.NullString
+	var transcriptText sql.NullString
 	var lastError sql.NullString
 	var contentType sql.NullString
 	var receivedAtRaw string
@@ -1076,6 +1112,7 @@ func scanCaptureRow(row rowScanner) (CaptureRecord, bool, error) {
 		&receivedAtRaw,
 		&rec.RawAudioPath,
 		&contentType,
+		&transcriptText,
 		&rec.Status,
 		&rec.Attempts,
 		&nextRetry,
@@ -1096,6 +1133,9 @@ func scanCaptureRow(row rowScanner) (CaptureRecord, bool, error) {
 	}
 	if contentType.Valid {
 		rec.ContentType = contentType.String
+	}
+	if transcriptText.Valid {
+		rec.TranscriptText = transcriptText.String
 	}
 	if journalPath.Valid {
 		rec.JournalPath = journalPath.String
