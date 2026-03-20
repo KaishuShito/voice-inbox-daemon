@@ -119,7 +119,7 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 	cleanupTemp := true
 	defer func() {
 		if cleanupTemp {
-			_ = os.Remove(upload.TempPath)
+			_ = s.removePersistedUpload(upload)
 		}
 	}()
 
@@ -243,6 +243,19 @@ func (s *Server) persistUpload(src io.Reader, filename, headerContentType, captu
 		FinalPath:   finalPath,
 		ContentType: contentType,
 	}, nil
+}
+
+func (s *Server) removePersistedUpload(upload persistedUpload) error {
+	var firstErr error
+	for _, path := range []string{upload.TempPath, upload.FinalPath} {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

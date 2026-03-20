@@ -97,6 +97,43 @@ func TestCapturesAreIdempotentByCaptureID(t *testing.T) {
 	}
 }
 
+func TestCapturesDedupedBySourceKeyDoNotLeaveOrphanFile(t *testing.T) {
+	srv, st, audioRoot := newTestServer(t)
+
+	first := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(first, newCaptureRequestWithDedupeKey(t, "cap-a", "shared-key", "pixel-8a", "2026-03-19T11:00:00Z", "audio/ogg", []byte("one")))
+	if first.Code != http.StatusCreated {
+		t.Fatalf("expected first request 201, got %d", first.Code)
+	}
+
+	original, found, err := st.GetCapture("cap-a")
+	if err != nil || !found {
+		t.Fatalf("expected original capture: found=%v err=%v", found, err)
+	}
+
+	second := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(second, newCaptureRequestWithDedupeKey(t, "cap-b", "shared-key", "pixel-8a", "2026-03-19T11:01:00Z", "audio/ogg", []byte("two")))
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected duplicate request 200, got %d", second.Code)
+	}
+
+	dup, found, err := st.GetCapture("cap-b")
+	if err != nil {
+		t.Fatalf("lookup duplicate capture: %v", err)
+	}
+	if found {
+		t.Fatalf("expected no row for deduped capture, got %+v", dup)
+	}
+
+	files, err := collectFiles(audioRoot)
+	if err != nil {
+		t.Fatalf("collect files: %v", err)
+	}
+	if len(files) != 1 || files[0] != original.RawAudioPath {
+		t.Fatalf("expected only original raw file to remain, got %v", files)
+	}
+}
+
 func newTestServer(t *testing.T) (*Server, *state.Store, string) {
 	t.Helper()
 	tmp := t.TempDir()
@@ -120,11 +157,18 @@ func newTestServer(t *testing.T) (*Server, *state.Store, string) {
 }
 
 func newCaptureRequest(t *testing.T, captureID, deviceID, capturedAt, contentType string, audio []byte) *http.Request {
+	return newCaptureRequestWithDedupeKey(t, captureID, "", deviceID, capturedAt, contentType, audio)
+}
+
+func newCaptureRequestWithDedupeKey(t *testing.T, captureID, dedupeKey, deviceID, capturedAt, contentType string, audio []byte) *http.Request {
 	t.Helper()
 	_ = contentType
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	_ = writer.WriteField("capture_id", captureID)
+	if dedupeKey != "" {
+		_ = writer.WriteField("source_dedupe_key", dedupeKey)
+	}
 	_ = writer.WriteField("device_id", deviceID)
 	_ = writer.WriteField("captured_at", capturedAt)
 	part, err := writer.CreateFormFile("audio", "memo.ogg")
@@ -142,6 +186,20 @@ func newCaptureRequest(t *testing.T, captureID, deviceID, capturedAt, contentTyp
 	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	return req
+}
+
+func collectFiles(root string) ([]string, error) {
+	var files []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	return files, err
 }
 
 func filepathHasPrefix(path, root string) bool {
